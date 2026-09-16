@@ -1,0 +1,14 @@
+{
+  "extends": "./.nuxt/tsconfig.json",
+  "exclude": [
+    "dist",
+    ".data",
+    "node_modules",
+    "node_modules/nuxt/node_modules",
+    "node_modules/@nuxt/telemetry/node_modules",
+    "node_modules/runtime/server",
+    "node_modules/dist/runtime/server",
+    ".output",
+    "supabase"
+  ]
+}

@@ -1,0 +1,29 @@
+# dependencies
+node_modules/
+
+# Nuxt build output
+.nuxt/
+.output/
+.data/
+dist/
+
+# env files (keep templates)
+.env
+.env.*
+!.env.example
+
+# Supabase
+supabase/.temp/
+# 在 supabase/ 子目录里执行 CLI 时产生的本地状态
+supabase/supabase/
+
+# Flutter / mobile
+mobile/.dart_tool/
+mobile/build/
+mobile/.flutter-plugins*
+mobile/ios/Pods/
+mobile/ios/.symlinks/
+
+# OS / editor
+.DS_Store
+*.iml

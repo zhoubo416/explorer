@@ -1,0 +1,22 @@
+{
+  "name": "explore-growth-agent",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "nuxt dev",
+    "build": "nuxt build",
+    "generate": "nuxt generate",
+    "typecheck": "nuxt typecheck",
+    "test": "node --test supabase/functions/explore-conversation/*.test.ts"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.112.3",
+    "dompurify": "^3.4.14",
+    "marked": "^18.0.11",
+    "nuxt": "^3.17.5"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3",
+    "vue-tsc": "^3.3.9"
+  }
+}
