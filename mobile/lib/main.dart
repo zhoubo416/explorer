@@ -3752,45 +3752,48 @@ class _GoalDetailScreenState extends State<GoalDetailScreen> {
         ),
           const SizedBox(height: 22),
           Row(
-            crossAxisAlignment: CrossAxisAlignment.end,
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    StatusLabel(status: goal.status),
-                    const SizedBox(height: 8),
-                    Text(
-                      goal.title,
-                      style: const TextStyle(
-                        fontSize: 24,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                    const SizedBox(height: 6),
-                    Text(
-                      goal.description,
-                      style: const TextStyle(color: muted, fontSize: 13),
-                    ),
-                  ],
-                ),
-              ),
-              Text(
-                '${goal.progress}%',
-                style: const TextStyle(
-                  color: purple,
-                  fontSize: 32,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
+              StatusLabel(status: goal.status),
               IconButton(
                 tooltip: '编辑目标',
+                visualDensity: VisualDensity.compact,
                 onPressed: widget.store.goalUpdating
                     ? null
                     : _showEditGoalSheet,
                 icon: const Icon(Icons.edit_outlined, color: muted, size: 20),
               ),
             ],
+          ),
+          const SizedBox(height: 8),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.baseline,
+            textBaseline: TextBaseline.alphabetic,
+            children: [
+              Expanded(
+                child: Text(
+                  goal.title,
+                  style: const TextStyle(
+                    fontSize: 24,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 14),
+              Text(
+                '${goal.progress}%',
+                style: const TextStyle(
+                  color: purple,
+                  fontSize: 28,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            goal.description,
+            style: const TextStyle(color: muted, fontSize: 13),
           ),
           const SizedBox(height: 20),
           SingleChildScrollView(
