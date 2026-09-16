@@ -29,6 +29,13 @@ Future<void> main() async {
   runApp(const ExploreApp());
 }
 
+// 首页问候语按当地小时计算：11 点前早上好，18 点前下午好，其余晚上好。
+// 测试通过同一函数计算期望值，避免断言依赖运行时刻。
+String greetingFor(DateTime now) {
+  final hour = now.hour;
+  return hour < 11 ? '早上好' : hour < 18 ? '下午好' : '晚上好';
+}
+
 enum ExplorePage {
   home,
   growth,
@@ -1718,8 +1725,7 @@ class HomeScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final hour = DateTime.now().hour;
-    final greeting = hour < 11 ? '早上好' : hour < 18 ? '下午好' : '晚上好';
+    final greeting = greetingFor(DateTime.now());
     return AppScroll(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,

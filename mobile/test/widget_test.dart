@@ -8,7 +8,7 @@ void main() {
   ) async {
     await tester.pumpWidget(const ExploreApp());
 
-    expect(find.text('早上好 ✦'), findsOneWidget);
+    expect(find.text('${greetingFor(DateTime.now())} ✦'), findsOneWidget);
     expect(find.text('当前主目标'), findsWidgets);
     expect(find.text('还没有目标'), findsOneWidget);
     expect(find.text('成为 AI 时代的独立创造者'), findsNothing);
@@ -44,7 +44,7 @@ void main() {
     await tester.tap(find.text('返回首页'));
     await tester.pumpAndSettle();
 
-    expect(find.text('早上好 ✦'), findsOneWidget);
+    expect(find.text('${greetingFor(DateTime.now())} ✦'), findsOneWidget);
 
     // 从成长页进入：返回按钮保持「返回目标」，点击回到成长页
     await tester.tap(find.text('成长'));
