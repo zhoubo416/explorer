@@ -172,6 +172,16 @@ function intValue(value: unknown): number {
   return Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 0
 }
 
+// 新会话的 AI 开场白：空会话先展示，发出第一条消息时随会话落库（见 sendMessage）
+export const CHAT_GREETING = '你好，我是探境。最近过得怎么样？开心的、烦心的，或者还没想明白的事，都可以随时说给我听。'
+
+// 目标共创的开场白：原「为什么从对话开始」侧栏文案并入这里
+export const GOAL_CREATION_GREETING = '你好，我是探境。目标不是一开始就完美的答案，而是你愿意先靠近的一条路——不用先想清楚，我们边走边发现。最近有没有一件事，你一直想做，但还没真正开始？'
+
+function chatGreetingMessage(): Message {
+  return { id: 'chat-greeting', role: 'assistant', content: CHAT_GREETING, time: '' }
+}
+
 const emptyGoal = (): Goal => ({
   id: '',
   title: '还没有目标',
@@ -246,6 +256,8 @@ export function useExplore() {
   const goalMemories = ref<MemoryItem[]>([])
   const actions = ref<Record<string, any>[]>([])
   const dailySuggestion = ref('')
+  // 快速连续切换主目标时，建议请求可能乱序返回；只认最后一次发起的
+  let suggestionRequestSeq = 0
 
   const rowToGoal = (row: Record<string, any>): Goal => {
     const status = row.status ?? 'exploring'
@@ -419,8 +431,10 @@ export function useExplore() {
 
   async function loadDailySuggestion() {
     if (!user.value) return
+    const request = ++suggestionRequestSeq
     const { data, error: e } = await invokeWithRetry('explore-daily-suggestion')
     if (e) throw e
+    if (request !== suggestionRequestSeq) return
     dailySuggestion.value = typeof data?.suggestion === 'string' ? data.suggestion : ''
   }
 
@@ -558,6 +572,13 @@ export function useExplore() {
     messages.value = (rows ?? []).map((row) => rowToMessage(row as Record<string, any>))
   }
 
+  // 切换/新建主目标后开启新对话：清空当前会话，
+  // 下一条消息会创建新会话（见 sendMessage）
+  function resetActiveConversation() {
+    activeSessionId.value = null
+    messages.value = []
+  }
+
   async function loadAll() {
     loading.value = true
     error.value = null
@@ -611,7 +632,20 @@ export function useExplore() {
 
   async function createGoal(title: string, description: string, successDefinition?: string, stages: Stage[] = []): Promise<string> {
     if (!user.value) return ''
-    const isMain = goals.value.length === 0
+    const isFirst = goals.value.length === 0
+    // 新建目标即当前专注：先清掉旧主目标标志再插入，
+    // 直接插入 is_main_goal: true 会撞一人一主目标的唯一索引
+    if (!isFirst) {
+      const { error: me } = await supabase
+        .from('explore_growth_goals')
+        .update({ is_main_goal: false })
+        .eq('user_id', user.value.id)
+        .eq('is_main_goal', true)
+      if (me) {
+        error.value = me.message
+        throw me
+      }
+    }
     const { data, error: e } = await supabase
       .from('explore_growth_goals')
       .insert({
@@ -620,7 +654,7 @@ export function useExplore() {
         description,
         success_definition: successDefinition ?? null,
         stages,
-        is_main_goal: isMain,
+        is_main_goal: true,
       })
       .select('*')
       .single()
@@ -632,7 +666,11 @@ export function useExplore() {
     goals.value = [goal, ...goals.value]
     mainGoalId.value = goal.id
     selectedGoalId.value = goal.id
-    if (isMain) generateProfile().catch(() => {})
+    // 新建目标即当前专注：同样开启新对话（见 setMainGoal）
+    resetActiveConversation()
+    // 建议按「目标+天」缓存：新目标成为主目标后重新取，当天该目标首次会生成一次
+    loadDailySuggestion().catch(() => {})
+    if (isFirst) generateProfile().catch(() => {})
     return goal.id
   }
 
@@ -665,6 +703,8 @@ export function useExplore() {
 
   async function updateGoalStatus(goalId: string, status: string) {
     if (!user.value) return
+    // loadGoals 会把 mainGoalId 重指到剩余目标上，先记下归档的是不是主目标
+    const wasMainGoal = goalId === mainGoalId.value
     const goal = goals.value.find((g) => g.id === goalId)
     const patch: Record<string, any> = { status }
     if (status === 'completed') {
@@ -683,6 +723,8 @@ export function useExplore() {
       throw e
     }
     await loadGoals()
+    // 归档的是主目标时，主目标落到其它目标上，建议跟着重新取
+    if (wasMainGoal && status === 'archived') loadDailySuggestion().catch(() => {})
   }
 
   async function goalChat(
@@ -824,6 +866,8 @@ export function useExplore() {
 
   async function setMainGoal(id: string) {
     if (!user.value) return
+    // 已是主目标就跳过，避免点开当前主目标把对话误清成新对话
+    if (id === mainGoalId.value) return
     const { error: e1 } = await supabase
       .from('explore_growth_goals')
       .update({ is_main_goal: false })
@@ -844,6 +888,10 @@ export function useExplore() {
     const target = goals.value.find((g) => g.id === id)
     if (target) goals.value = [target, ...goals.value.filter((g) => g.id !== id)]
     mainGoalId.value = id
+    // 新目标配新对话：进对话页保持空态，第一条消息创建新会话
+    resetActiveConversation()
+    // 建议按「目标+天」缓存：切换后重新取，新目标当天首次会生成一次
+    loadDailySuggestion().catch(() => {})
   }
 
   function focusGoal(id: string) {
@@ -922,6 +970,15 @@ export function useExplore() {
         if (se) throw se
         activeSessionId.value = session.id
         conversations.value = [{ id: session.id, title: '新的对话', preview: text }, ...conversations.value]
+        // 新会话先落一条 AI 欢迎语（与目标共创的开场一致），失败不阻塞发送；
+        // 本地同步补上，避免发送后欢迎语凭空消失
+        const { error: ge } = await supabase.from('explore_conversations').insert({
+          session_id: activeSessionId.value,
+          user_id: user.value.id,
+          role: 'assistant',
+          content: CHAT_GREETING,
+        })
+        if (!ge) messages.value = [chatGreetingMessage(), ...messages.value]
       }
 
       await supabase.from('explore_conversations').insert({

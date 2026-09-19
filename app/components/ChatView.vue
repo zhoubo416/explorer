@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { Message } from '~/composables/useExplore'
+import { CHAT_GREETING } from '~/composables/useExplore'
 
 const props = defineProps<{ messages: readonly Message[]; conversations: readonly { id: string; title: string; preview: string }[] }>()
 const emit = defineEmits<{ send: [content: string, mode: 'normal' | 'low_mood']; selectConversation: [id: string] }>()
@@ -7,6 +8,14 @@ const mode = shallowRef<'normal' | 'low-mood'>('normal')
 const draft = shallowRef('')
 const showHistory = shallowRef(false)
 const inputRef = useTemplateRef<HTMLInputElement>('chatInput')
+
+// 空会话显示一条 AI 欢迎语（与目标共创的开场一致）；
+// 发出第一条消息时由 sendMessage 落库，此后保留在会话历史里
+const displayMessages = computed(() =>
+  props.messages.length
+    ? props.messages
+    : [{ id: 'chat-greeting', role: 'assistant' as const, content: CHAT_GREETING, time: '' }],
+)
 
 function submitMessage() {
   const content = draft.value.trim()
@@ -37,8 +46,7 @@ function todayLabel() {
     <div class="chat-body">
       <div class="chat-date">今天 · {{ todayLabel() }}</div>
       <div v-if="mode === 'low-mood'" class="companion-banner"><Icon name="spark" :size="15" /><span>你不用现在就解决所有问题，我们先一起理解它。</span></div>
-      <div v-if="!props.messages.length" class="chat-empty"><Icon name="spark" :size="22" /><p>开始一次对话，让探境更了解你。</p></div>
-      <div v-for="message in props.messages" :key="message.id" class="message-row" :class="message.role">
+      <div v-for="message in displayMessages" :key="message.id" class="message-row" :class="message.role">
         <div v-if="message.role === 'assistant'" class="message-avatar"><span /></div>
         <div class="message-bubble"><MarkdownText v-if="message.role === 'assistant' && message.content" :text="message.content" /><span v-else-if="message.role === 'assistant'" class="message-thinking">正在思考…</span><p v-else>{{ message.content }}</p><time>{{ message.time }}</time></div>
       </div>
