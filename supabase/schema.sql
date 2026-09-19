@@ -356,3 +356,27 @@ from public.explore_growth_goals g
 where s.goal_id is null
   and g.user_id = s.user_id
   and g.is_main_goal;
+
+-- 2026-09-19 意见反馈与内容举报（App Store 审核要求 AI 生成内容类应用提供反馈渠道）
+-- 只有本人能写、本人能读；删除账号时随 auth.users 级联清空
+create table if not exists public.explore_feedback (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  category varchar(20) not null default 'feedback' check (category in ('feedback', 'content_report')),
+  content text not null,
+  contact text,
+  app_version varchar(20),
+  platform varchar(20),
+  created_at timestamptz not null default now()
+);
+
+create index if not exists idx_explore_feedback_user_created
+  on public.explore_feedback (user_id, created_at desc);
+
+alter table public.explore_feedback enable row level security;
+
+drop policy if exists explore_feedback_self on public.explore_feedback;
+create policy explore_feedback_self on public.explore_feedback
+  for all to authenticated
+  using (user_id = auth.uid())
+  with check (user_id = auth.uid());
