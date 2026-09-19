@@ -92,7 +92,19 @@ void main() {
       'completed': ['完成 Agent Demo', '做了 5 次用户访谈'],
       'insight': '从学习转向创造，开始用真实反馈检验想法。',
       'next_steps': ['把方向收窄到一个场景'],
+      'week_start': '8/10',
+      'week_end': '8/16',
     };
+    for (var i = 0; i < 3; i++) {
+      store.reports.add({
+        'week_start': '8/${10 + i * 7}',
+        'week_end': '8/${16 + i * 7}',
+        'score': 4.0 + i * 0.5,
+        'completed': ['完成 Agent Demo'],
+        'insight': '从学习转向创造，开始用真实反馈检验想法。',
+        'next_steps': ['把方向收窄到一个场景'],
+      });
+    }
     store.goalAnalysis = {
       'summary': '这个阶段你完成了从想法到 Demo 的跨越。',
       'observation': '实践比例在上升。',
@@ -229,6 +241,8 @@ void main() {
       '成长': ExplorePage.growth,
       '对话': ExplorePage.chat,
       '我的': ExplorePage.report,
+      '周报列表': ExplorePage.weeklyReports,
+      '周报详情': ExplorePage.weeklyReportDetail,
       '目标详情': ExplorePage.goalDetail,
       '共创目标': ExplorePage.goalCreate,
       '创建完成': ExplorePage.goalCreated,
@@ -519,6 +533,68 @@ void main() {
       find.textContaining('阿里云百炼的数据处理在中国大陆', findRichText: true),
       findsOneWidget,
     );
+  });
+
+  // 「我的」页信息分工：画像置顶，账号与政策协议沉底，周报走二级页
+  testWidgets('我的页画像在上、周报入口居中、账号与协议在下', (tester) async {
+    final store = seededStore();
+    await tester.binding.setSurfaceSize(const Size(390, 1400));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(
+      MaterialApp(home: Scaffold(body: ReportScreen(store: store))),
+    );
+    await tester.pump();
+
+    expect(find.text('成长周报'), findsOneWidget);
+    expect(find.text('本周成长报告'), findsNothing, reason: '周报内容应移出我的页');
+    expect(find.text('历史周报'), findsNothing, reason: '选周下拉已被列表页取代');
+
+    final profileY = tester.getRect(find.text('你的画像')).top;
+    final reportsY = tester.getRect(find.text('成长周报')).top;
+    expect(profileY, lessThan(reportsY), reason: '画像要在周报入口之上');
+  });
+
+  testWidgets('周报列表按周展示，点进去看当周详情', (tester) async {
+    final store = seededStore();
+    await tester.binding.setSurfaceSize(const Size(390, 1400));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: AnimatedBuilder(
+            animation: store,
+            builder: (_, _) => WeeklyReportsScreen(store: store),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    // 列表：三周各一行
+    expect(find.text('8/10 — 8/16'), findsOneWidget);
+    expect(find.text('8/17 — 8/23'), findsOneWidget);
+
+    // 点第二周 → 进入详情，标题与内容都换成那一周
+    await tester.tap(find.text('8/17 — 8/23'));
+    await tester.pump();
+    expect(store.page, ExplorePage.weeklyReportDetail);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: AnimatedBuilder(
+            animation: store,
+            builder: (_, _) => WeeklyReportDetailScreen(store: store),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(find.text('8/17 — 8/23'), findsOneWidget);
+    expect(find.text('本周评分'), findsOneWidget);
+    expect(find.text('你做到了这些'), findsOneWidget);
+    // 库里存的是 next_steps：下周建议必须读得到，不能是空列表
+    expect(find.text('把方向收窄到一个场景'), findsOneWidget);
   });
 
   testWidgets('反馈面板内容为空时不发送', (tester) async {

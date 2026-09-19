@@ -50,7 +50,17 @@ class InsightService {
     final res = await SupabaseService.invokeWithRetry('explore-weekly-report');
     final data = res.data;
     if (data is Map && data['report'] is Map) {
-      return Map<String, dynamic>.from(data['report'] as Map);
+      final report = Map<String, dynamic>.from(data['report'] as Map);
+      // 函数返回的是模型口径（nextSteps / week），库里存的是 next_steps + week_start/end。
+      // 统一成库里的形状，界面上只认一种，避免「刚生成」和「重新加载」两种数据显示不一样。
+      final legend = report['next_steps'] ?? report['nextSteps'];
+      if (legend is List) report['next_steps'] = legend;
+      final week = data['week'];
+      if (week is Map) {
+        report['week_start'] ??= week['start'];
+        report['week_end'] ??= week['end'];
+      }
+      return report;
     }
     return null;
   }

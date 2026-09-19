@@ -50,6 +50,10 @@ enum ExplorePage {
   growth,
   chat,
   report,
+  /// 成长周报列表（我的 → 成长周报）
+  weeklyReports,
+  /// 某一周的周报详情（列表 → 点某周）
+  weeklyReportDetail,
   goalDetail,
   goalCreate,
   goalCreated,
@@ -698,6 +702,8 @@ class ExploreStore extends ChangeNotifier {
 
   // 覆盖在底部导航之上、带「返回」语义的子页面
   static const Set<ExplorePage> subPages = {
+    ExplorePage.weeklyReports,
+    ExplorePage.weeklyReportDetail,
     ExplorePage.goalDetail,
     ExplorePage.goalCreate,
     ExplorePage.goalCreated,
@@ -713,9 +719,22 @@ class ExploreStore extends ChangeNotifier {
         goToPage(goalCreateOrigin);
       case ExplorePage.goalDetail || ExplorePage.goalCreated:
         goToPage(ExplorePage.growth);
+      case ExplorePage.weeklyReports:
+        goToPage(ExplorePage.report);
+      case ExplorePage.weeklyReportDetail:
+        goToPage(ExplorePage.weeklyReports);
       default:
         break;
     }
+  }
+
+  /// 我的 → 成长周报列表
+  void openWeeklyReports() => goToPage(ExplorePage.weeklyReports);
+
+  /// 列表 → 某一周详情：详情页直接读 weeklyReport 渲染
+  void openWeeklyReport(Map<String, dynamic> row) {
+    selectReport(row);
+    goToPage(ExplorePage.weeklyReportDetail);
   }
 
   void openGoal(Goal goal) {
@@ -2013,6 +2032,10 @@ class ExploreShell extends StatelessWidget {
         return ChatScreen(store: store);
       case ExplorePage.report:
         return ReportScreen(store: store);
+      case ExplorePage.weeklyReports:
+        return WeeklyReportsScreen(store: store);
+      case ExplorePage.weeklyReportDetail:
+        return WeeklyReportDetailScreen(store: store);
       case ExplorePage.goalDetail:
         return GoalDetailScreen(store: store);
       case ExplorePage.goalCreate:
@@ -4936,6 +4959,8 @@ class _GoalDetailScreenState extends State<GoalDetailScreen> {
   }
 }
 
+/// 「我的」：画像置顶，账号与政策协议沉底；周报独立成二级页
+/// （列表见 WeeklyReportsScreen，单周详情见 WeeklyReportDetailScreen）
 class ReportScreen extends StatelessWidget {
   const ReportScreen({super.key, required this.store});
   final ExploreStore store;
@@ -4943,7 +4968,7 @@ class ReportScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Column(
     children: [
-      const ExploreAppBar(title: '本周成长报告'),
+      const ExploreAppBar(title: '我的'),
       Expanded(child: _body()),
     ],
   );
@@ -4953,48 +4978,37 @@ class ReportScreen extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const SizedBox(height: 6),
-        if (store.reports.isNotEmpty) ...[
-          const SizedBox(height: 14),
-          DropdownButtonFormField<String>(
-            initialValue: store.weeklyReport?['week_start']?.toString(),
-            decoration: InputDecoration(
-              labelText: '历史周报',
-              filled: true,
-              fillColor: Colors.white,
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide: const BorderSide(color: line),
-              ),
-              enabledBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide: const BorderSide(color: line),
-              ),
-              contentPadding: const EdgeInsets.symmetric(
-                horizontal: 14,
-                vertical: 12,
-              ),
-            ),
-            items: [
-              for (final r in store.reports)
-                DropdownMenuItem(
-                  value: r['week_start']?.toString(),
-                  child: Text(
-                    '${r['week_start']} — ${r['week_end']}',
-                    style: const TextStyle(fontSize: 14),
-                  ),
+        // 画像置顶：进「我的」先看到「我是谁」，周报与账号都往下放
+        if (store.profile != null)
+          _ProfileCard(
+            profile: store.profile!,
+            onRegenerate: () => store.generateProfile(),
+          )
+        else
+          WhiteCard(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const SectionTitle(eyebrow: '你的画像', title: '让探境更了解你'),
+                const SizedBox(height: 8),
+                const Text(
+                  '从你的记忆里提炼出性格、价值观与兴趣。',
+                  style: TextStyle(color: muted, fontSize: 14),
                 ),
-            ],
-            onChanged: (value) {
-              if (value == null) return;
-              final row = store.reports.firstWhere(
-                (r) => r['week_start']?.toString() == value,
-              );
-              store.selectReport(row);
-            },
+                const SizedBox(height: 12),
+                PrimaryButton(
+                  label: '生成画像',
+                  icon: Icons.auto_awesome_rounded,
+                  onTap: () => store.generateProfile(),
+                ),
+              ],
+            ),
           ),
-        ],
+        const SizedBox(height: 16),
+        _WeeklyReportEntry(store: store),
+        const SizedBox(height: 18),
+        // 账号与政策协议沉到页面底部
         if (SupabaseService.client != null) ...[
-          const SizedBox(height: 18),
           WhiteCard(
             child: Row(
               children: [
@@ -5045,38 +5059,207 @@ class ReportScreen extends StatelessWidget {
               ],
             ),
           ),
-        ],
-        if (SupabaseService.client != null) ...[
           const SizedBox(height: 14),
           AccountActionsCard(store: store),
         ],
-        const SizedBox(height: 16),
-        if (store.profile != null)
-          _ProfileCard(
-            profile: store.profile!,
-            onRegenerate: () => store.generateProfile(),
-          )
-        else
-          WhiteCard(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const SectionTitle(eyebrow: '你的画像', title: '让探境更了解你'),
-                const SizedBox(height: 8),
-                const Text(
-                  '从你的记忆里提炼出性格、价值观与兴趣。',
-                  style: TextStyle(color: muted, fontSize: 14),
-                ),
-                const SizedBox(height: 12),
-                PrimaryButton(
-                  label: '生成画像',
-                  icon: Icons.auto_awesome_rounded,
-                  onTap: () => store.generateProfile(),
-                ),
-              ],
+      ],
+    ),
+  );
+}
+
+/// 我的 → 成长周报的入口
+class _WeeklyReportEntry extends StatelessWidget {
+  const _WeeklyReportEntry({required this.store});
+  final ExploreStore store;
+
+  @override
+  Widget build(BuildContext context) {
+    final latest = store.weeklyReport;
+    final start = latest?['week_start']?.toString() ?? '';
+    final end = latest?['week_end']?.toString() ?? '';
+    final subtitle = latest == null
+        ? '每周回顾成长与下一步'
+        : '$start — $end · 本周评分 ${latest['score'] ?? '—'}';
+    return WhiteCard(
+      child: InkWell(
+        onTap: store.openWeeklyReports,
+        borderRadius: BorderRadius.circular(12),
+        child: Row(
+          children: [
+            Container(
+              width: 40,
+              height: 40,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: violetBg,
+                borderRadius: BorderRadius.circular(13),
+              ),
+              child: const Icon(Icons.insights_rounded, color: purple, size: 20),
             ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    '成长周报',
+                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    subtitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(color: muted, fontSize: 12),
+                  ),
+                ],
+              ),
+            ),
+            const Icon(Icons.chevron_right_rounded, size: 18, color: muted2),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 成长周报列表：一周一行，点进去看当周详情
+class WeeklyReportsScreen extends StatelessWidget {
+  const WeeklyReportsScreen({super.key, required this.store});
+  final ExploreStore store;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    children: [
+      ExploreAppBar(
+        onBack: () => store.goToPage(ExplorePage.report),
+        backLabel: '返回我的',
+        title: '成长周报',
+      ),
+      Expanded(
+        child: AppScroll(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (store.reports.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 48, horizontal: 20),
+                  child: Text(
+                    '还没有周报。多聊几次、把这一周的事记下来，探境会在周末为你整理一份回顾。',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: muted2, fontSize: 13, height: 1.7),
+                  ),
+                )
+              else
+                for (final row in store.reports)
+                  _WeeklyReportRow(
+                    row: row,
+                    onTap: () => store.openWeeklyReport(row),
+                  ),
+            ],
           ),
-        const SizedBox(height: 24),
+        ),
+      ),
+    ],
+  );
+}
+
+class _WeeklyReportRow extends StatelessWidget {
+  const _WeeklyReportRow({required this.row, required this.onTap});
+  final Map<String, dynamic> row;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(bottom: 12),
+    child: WhiteCard(
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '${row['week_start'] ?? ''} — ${row['week_end'] ?? ''}',
+                    style: const TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 5),
+                  Text(
+                    row['insight']?.toString() ?? '这一周的记录',
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: muted,
+                      fontSize: 12.5,
+                      height: 1.5,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            Text(
+              row['score']?.toString() ?? '—',
+              style: const TextStyle(
+                color: purple,
+                fontSize: 22,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const Icon(Icons.chevron_right_rounded, size: 18, color: muted2),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
+/// 某一周的周报详情：内容按周报四段展示
+class WeeklyReportDetailScreen extends StatelessWidget {
+  const WeeklyReportDetailScreen({super.key, required this.store});
+  final ExploreStore store;
+
+  @override
+  Widget build(BuildContext context) {
+    final report = store.weeklyReport;
+    final start = report?['week_start']?.toString() ?? '';
+    final end = report?['week_end']?.toString() ?? '';
+    return Column(
+      children: [
+        ExploreAppBar(
+          onBack: () => store.goToPage(ExplorePage.weeklyReports),
+          backLabel: '返回周报',
+          title: start.isEmpty ? '周报详情' : '$start — $end',
+        ),
+        Expanded(
+          child: AppScroll(child: _WeeklyReportBody(store: store)),
+        ),
+      ],
+    );
+  }
+}
+
+/// 周报四段内容：本周评分 / 本周完成 / 我的发现 / 下周建议
+class _WeeklyReportBody extends StatelessWidget {
+  const _WeeklyReportBody({required this.store});
+  final ExploreStore store;
+
+  @override
+  Widget build(BuildContext context) {
+    final report = store.weeklyReport;
+    // 库里列名是 next_steps，函数返回的是 nextSteps：两种形状都认，
+    // 否则「下周建议」只会显示空列表
+    final nextSteps =
+        (report?['next_steps'] ?? report?['nextSteps']) as List? ?? const [];
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
         Container(
           width: double.infinity,
           padding: const EdgeInsets.all(22),
@@ -5093,7 +5276,7 @@ class ReportScreen extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
                   Text(
-                    store.weeklyReport?['score']?.toString() ?? '—',
+                    report?['score']?.toString() ?? '—',
                     style: const TextStyle(
                       color: purple,
                       fontSize: 46,
@@ -5108,7 +5291,7 @@ class ReportScreen extends StatelessWidget {
                 ],
               ),
               Text(
-                store.weeklyReport?['insight']?.toString() ?? '',
+                report?['insight']?.toString() ?? '',
                 style: const TextStyle(color: muted, fontSize: 13),
               ),
             ],
@@ -5122,7 +5305,7 @@ class ReportScreen extends StatelessWidget {
               const SectionTitle(eyebrow: '本周完成', title: '你做到了这些'),
               const SizedBox(height: 14),
               for (final item
-                  in (store.weeklyReport?['completed'] as List? ?? const []))
+                  in (report?['completed'] as List? ?? const []))
                 CheckLine(label: item.toString()),
             ],
           ),
@@ -5135,7 +5318,7 @@ class ReportScreen extends StatelessWidget {
               const SectionTitle(eyebrow: '我的发现', title: '一个重要变化'),
               const SizedBox(height: 14),
               Text(
-                store.weeklyReport?['insight']?.toString() ?? '继续积累，变化会逐渐显现。',
+                report?['insight']?.toString() ?? '继续积累，变化会逐渐显现。',
                 style: const TextStyle(
                   color: Color(0xFF4A4A63),
                   fontSize: 14,
@@ -5167,23 +5350,29 @@ class ReportScreen extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 14),
-              for (final item
-                  in (store.weeklyReport?['nextSteps'] as List? ?? const []))
+              for (final item in nextSteps)
                 Padding(
                   padding: const EdgeInsets.symmetric(vertical: 7),
                   child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Icon(
-                        Icons.arrow_forward_rounded,
-                        color: Color(0xFF9D96FC),
-                        size: 14,
+                      const Padding(
+                        padding: EdgeInsets.only(top: 3),
+                        child: Icon(
+                          Icons.arrow_forward_rounded,
+                          color: Color(0xFF9D96FC),
+                          size: 14,
+                        ),
                       ),
                       const SizedBox(width: 8),
-                      Text(
-                        item.toString(),
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 13,
+                      Expanded(
+                        child: Text(
+                          item.toString(),
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 13,
+                            height: 1.6,
+                          ),
                         ),
                       ),
                     ],
@@ -5205,8 +5394,8 @@ class ReportScreen extends StatelessWidget {
           ),
         ),
       ],
-    ),
-  );
+    );
+  }
 }
 
 class AppScroll extends StatelessWidget {
