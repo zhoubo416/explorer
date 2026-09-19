@@ -104,6 +104,8 @@ Deno.serve(async (request) => {
       .eq("user_id", userId)
       .neq("status", "archived")
       .order("is_main_goal", { ascending: false })
+      // 非主目标间的顺序固定为最新在前，与 Web 端 loadGoals 排序一致
+      .order("created_at", { ascending: false })
       .limit(10),
     supabase
       .from("explore_conversations")

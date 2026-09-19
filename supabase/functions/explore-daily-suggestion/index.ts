@@ -86,42 +86,46 @@ Deno.serve(async (request) => {
     const userId = userData.user.id;
 
     const today = new Date().toISOString().slice(0, 10);
+
+    // 建议按「目标+天」缓存：先取当前主目标，再查它当天有没有建议
+    const goalRes = await supabase
+      .from("explore_growth_goals")
+      .select("id,title,description,stages,status,progress")
+      .eq("user_id", userId)
+      .neq("status", "archived")
+      .order("is_main_goal", { ascending: false })
+      // 存量数据可能没有 is_main_goal 标志：兜底取最新目标，与 Web 端 loadGoals 排序一致
+      .order("created_at", { ascending: false })
+      .limit(1);
+    if (goalRes.error) return jsonResponse({ error: "Failed to load context" }, 500);
+    const goal = goalRes.data?.[0];
+
+    // 没有主目标时建议无处绑定：给静态引导，不落库
+    if (!goal) return jsonResponse({ suggestion: "从一次对话开始，让探境更了解你。" });
+
     const { data: existing } = await supabase
       .from("explore_daily_suggestions")
       .select("content")
       .eq("user_id", userId)
+      .eq("goal_id", goal.id)
       .eq("suggestion_date", today)
       .maybeSingle();
     if (existing?.content) return jsonResponse({ suggestion: existing.content });
 
-    const [goalRes, memoriesRes] = await Promise.all([
-      supabase
-        .from("explore_growth_goals")
-        .select("title,description,stages,status,progress")
-        .eq("user_id", userId)
-        .neq("status", "archived")
-        .order("is_main_goal", { ascending: false })
-        .limit(1),
-      supabase
-        .from("explore_memory_items")
-        .select("type,content")
-        .eq("user_id", userId)
-        .order("created_at", { ascending: false })
-        .limit(12),
-    ]);
-    if (goalRes.error || memoriesRes.error) return jsonResponse({ error: "Failed to load context" }, 500);
-
-    const goal = goalRes.data?.[0];
+    const memoriesRes = await supabase
+      .from("explore_memory_items")
+      .select("type,content")
+      .eq("user_id", userId)
+      .order("created_at", { ascending: false })
+      .limit(12);
+    if (memoriesRes.error) return jsonResponse({ error: "Failed to load context" }, 500);
     const memories = memoriesRes.data ?? [];
-    if (!goal && memories.length === 0) {
-      return jsonResponse({ suggestion: "从一次对话开始，让探境更了解你。" });
-    }
 
-    const activeStage = goal && Array.isArray(goal.stages)
+    const activeStage = Array.isArray(goal.stages)
       ? (goal.stages as any[]).find((s) => s?.status === "active") ?? (goal.stages as any[])[0]
       : null;
     const context = JSON.stringify({
-      goal: goal ? { title: goal.title, status: goal.status, progress: goal.progress } : null,
+      goal: { title: goal.title, status: goal.status, progress: goal.progress },
       active_stage: activeStage ? { name: activeStage.name, actions: activeStage.actions } : null,
       recent_memories: memories.map((m) => ({ type: m.type, content: m.content })),
     });
@@ -150,7 +154,10 @@ Deno.serve(async (request) => {
 
     await supabase
       .from("explore_daily_suggestions")
-      .upsert({ user_id: userId, suggestion_date: today, content: suggestion }, { onConflict: "user_id,suggestion_date" });
+      .upsert(
+        { user_id: userId, suggestion_date: today, content: suggestion, goal_id: goal.id },
+        { onConflict: "user_id,goal_id,suggestion_date" },
+      );
 
     return jsonResponse({ suggestion });
   } catch (err) {

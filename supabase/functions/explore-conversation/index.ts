@@ -422,6 +422,8 @@ Deno.serve(async (request) => {
       .eq("user_id", userId)
       .neq("status", "archived")
       .order("is_main_goal", { ascending: false })
+      // 存量数据可能没有 is_main_goal 标志：兜底取最新目标，与 Web 端 loadGoals 排序一致
+      .order("created_at", { ascending: false })
       .limit(1),
     supabase
       .from("explore_user_profiles")

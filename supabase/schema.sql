@@ -336,3 +336,23 @@ set next_steps = (
   from jsonb_array_elements(next_steps) as elem
 )
 where next_steps::text like '%用户%';
+
+-- 2026-09-16 每日建议按「目标+天」缓存（每个目标每天最多生成一条）
+-- 主目标切换后建议跟随当前目标；唯一键从 (user_id, suggestion_date) 改为 (user_id, goal_id, suggestion_date)
+-- 与 explore-daily-suggestion 的按目标查询和 upsert 对应；增量幂等，可重复执行
+alter table public.explore_daily_suggestions
+  add column if not exists goal_id uuid references public.explore_growth_goals(id) on delete set null;
+
+alter table public.explore_daily_suggestions
+  drop constraint if exists explore_daily_suggestions_user_id_suggestion_date_key;
+
+create unique index if not exists idx_explore_daily_suggestions_user_goal_date
+  on public.explore_daily_suggestions (user_id, goal_id, suggestion_date);
+
+-- 存量行回填：把已生成的建议归到该用户的当前主目标（只影响 goal_id 为空的行）
+update public.explore_daily_suggestions s
+set goal_id = g.id
+from public.explore_growth_goals g
+where s.goal_id is null
+  and g.user_id = s.user_id
+  and g.is_main_goal;
