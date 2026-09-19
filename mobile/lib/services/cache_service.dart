@@ -28,4 +28,12 @@ class CacheService {
       await prefs.setString('$_prefix$userId', jsonEncode(payload));
     } catch (_) {}
   }
+
+  /// 删除账号后调用：本机不该再留着这个用户的缓存
+  static Future<void> clear(String userId) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove('$_prefix$userId');
+    } catch (_) {}
+  }
 }

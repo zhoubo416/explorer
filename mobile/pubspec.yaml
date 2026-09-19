@@ -65,6 +65,8 @@ flutter:
   # 与 Web 端 app/public/logo.png 同源，首页顶栏品牌展示用
   assets:
     - assets/logo.png
+    # 隐私政策 / 用户协议 / 支持页，与 docs/legal 下发布的网页同源
+    - assets/legal/
 
   # To add assets to your application, add an assets section, like this:
   # assets:

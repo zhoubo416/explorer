@@ -109,6 +109,22 @@ void main() {
     await tester.pump();
   }
 
+  /// 渲染单个面板 / 卡片（不套 ExploreShell），用于交互流程测试
+  Future<void> pumpPanel(
+    WidgetTester tester,
+    Widget child, {
+    bool settle = false,
+  }) async {
+    await tester.binding.setSurfaceSize(const Size(390, 844));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(MaterialApp(home: Scaffold(body: child)));
+    if (settle) {
+      await tester.pumpAndSettle();
+    } else {
+      await tester.pump();
+    }
+  }
+
   /// 在真实外壳（ExploreShell：根部 SafeArea + 底部导航）下渲染，并按机型注入
   /// 底部安全区高度——真机由系统给出，测试环境默认是 0，不注入就测不到安全区问题。
   Future<void> pumpShell(
@@ -443,5 +459,53 @@ void main() {
     expect(newest.top, greaterThan(older.top));
     // 视口应停在最新消息处：最旧的消息未被构建
     expect(find.text('消息序号 0'), findsNothing);
+  });
+
+  // App Store 审核关注点：支持注册的 App 必须能在应用内删除账号（Guideline 5.1.1(v)），
+  // 且这类不可逆操作要有二次确认。这组用例钉住入口与确认流程。
+  testWidgets('我的页有法务与删除账号入口', (tester) async {
+    await pumpPanel(tester, AccountActionsCard(store: seededStore()));
+    for (final label in ['隐私政策', '用户协议', '意见反馈 / 内容举报', '删除账号']) {
+      expect(find.text(label), findsOneWidget);
+    }
+  });
+
+  testWidgets('删除账号需要二次确认，取消后账号仍在', (tester) async {
+    await pumpPanel(tester, AccountActionsCard(store: seededStore()));
+    await tester.tap(find.text('删除账号'));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text('账号与全部数据（目标、记忆、对话记录）会被永久删除，无法恢复。确定要继续吗？'),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('确认删除'), findsNothing);
+    expect(find.text('删除账号'), findsOneWidget);
+  });
+
+  testWidgets('隐私政策面板能读到随包发布的正文', (tester) async {
+    await pumpPanel(
+      tester,
+      const LegalSheet(title: '隐私政策', asset: 'assets/legal/privacy.md'),
+      settle: true,
+    );
+    expect(
+      find.textContaining('我们收集哪些信息', findRichText: true),
+      findsOneWidget,
+    );
+    expect(
+      find.textContaining('美国东部', findRichText: true),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('反馈面板内容为空时不发送', (tester) async {
+    await pumpPanel(tester, FeedbackSheet(store: seededStore()));
+    await tester.tap(find.text('发送'));
+    await tester.pump();
+    expect(find.text('写点什么再发送吧。'), findsOneWidget);
   });
 }

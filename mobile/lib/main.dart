@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 
@@ -1238,6 +1239,35 @@ class ExploreStore extends ChangeNotifier {
     _pendingNewChat = false;
     remoteError = null;
     notifyListeners();
+  }
+
+  /// 删除账号：服务端删掉 auth 用户（业务数据随外键级联清空），
+  /// 本机再清掉该用户的本地缓存并登出。
+  /// 不重试：删除不可逆，失败时交给用户自己决定要不要再试。
+  Future<void> deleteAccount() async {
+    final userId = SupabaseService.client?.auth.currentUser?.id;
+    if (userId == null) return;
+    await const AuthService().deleteAccount();
+    await CacheService.clear(userId);
+    await signOut();
+  }
+
+  /// 意见反馈 / 内容举报：写进 explore_feedback，只有本人能写、本人能读
+  Future<void> submitFeedback({
+    required String category,
+    required String content,
+  }) async {
+    final client = SupabaseService.client;
+    final userId = client?.auth.currentUser?.id;
+    if (client == null || userId == null) {
+      throw StateError('请先登录。');
+    }
+    await client.from('explore_feedback').insert({
+      'user_id': userId,
+      'category': category,
+      'content': content,
+      'platform': defaultTargetPlatform.name,
+    });
   }
 
   Future<void> sendMessage(String value) async {
@@ -4946,6 +4976,10 @@ class ReportScreen extends StatelessWidget {
             ),
           ),
         ],
+        if (SupabaseService.client != null) ...[
+          const SizedBox(height: 14),
+          AccountActionsCard(store: store),
+        ],
         const SizedBox(height: 16),
         if (store.profile != null)
           _ProfileCard(
@@ -5493,6 +5527,361 @@ class CheckLine extends StatelessWidget {
           style: const TextStyle(color: muted, fontSize: 13),
         ),
       ],
+    ),
+  );
+}
+
+/// 「我的」页的功能入口：隐私政策 / 用户协议 / 意见反馈 / 删除账号。
+/// 删除账号不可逆，这里持有 deleting 状态避免重复点击。
+class AccountActionsCard extends StatefulWidget {
+  const AccountActionsCard({super.key, required this.store});
+  final ExploreStore store;
+
+  @override
+  State<AccountActionsCard> createState() => _AccountActionsCardState();
+}
+
+class _AccountActionsCardState extends State<AccountActionsCard> {
+  bool deleting = false;
+
+  Future<void> _openLegal(String title, String asset) => showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    backgroundColor: Colors.transparent,
+    builder: (_) => LegalSheet(title: title, asset: asset),
+  );
+
+  Future<void> _openFeedback() => showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    backgroundColor: Colors.transparent,
+    builder: (_) => FeedbackSheet(store: widget.store),
+  );
+
+  Future<void> _confirmDelete() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('删除账号'),
+        content: const Text('账号与全部数据（目标、记忆、对话记录）会被永久删除，无法恢复。确定要继续吗？'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            style: TextButton.styleFrom(foregroundColor: const Color(0xFFD75B50)),
+            child: const Text('确认删除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() => deleting = true);
+    try {
+      await widget.store.deleteAccount();
+      // 成功后 AuthGate 会切回登录页，这里不再跳转
+    } on Object catch (error) {
+      if (!mounted) return;
+      setState(() => deleting = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            error is StateError ? error.message : '删除失败，请稍后再试。',
+          ),
+        ),
+      );
+    }
+  }
+
+  Widget _row({
+    required IconData icon,
+    required String label,
+    required VoidCallback? onTap,
+    bool danger = false,
+  }) => InkWell(
+    onTap: onTap,
+    borderRadius: BorderRadius.circular(12),
+    child: Padding(
+      padding: const EdgeInsets.symmetric(vertical: 13),
+      child: Row(
+        children: [
+          Icon(icon, size: 19, color: danger ? const Color(0xFFD75B50) : purple),
+          const SizedBox(width: 11),
+          Expanded(
+            child: Text(
+              label,
+              style: TextStyle(
+                fontSize: 14,
+                color: danger ? const Color(0xFFD75B50) : ink,
+              ),
+            ),
+          ),
+          if (onTap != null)
+            const Icon(Icons.chevron_right_rounded, size: 18, color: muted2),
+        ],
+      ),
+    ),
+  );
+
+  Widget _divider() => const Divider(height: 1, thickness: 1, color: line);
+
+  @override
+  Widget build(BuildContext context) => WhiteCard(
+    child: Column(
+      children: [
+        _row(
+          icon: Icons.privacy_tip_outlined,
+          label: '隐私政策',
+          onTap: () => _openLegal('隐私政策', 'assets/legal/privacy.md'),
+        ),
+        _divider(),
+        _row(
+          icon: Icons.description_outlined,
+          label: '用户协议',
+          onTap: () => _openLegal('用户协议', 'assets/legal/terms.md'),
+        ),
+        _divider(),
+        _row(
+          icon: Icons.forum_outlined,
+          label: '意见反馈 / 内容举报',
+          onTap: _openFeedback,
+        ),
+        _divider(),
+        _row(
+          icon: Icons.delete_outline_rounded,
+          label: deleting ? '正在删除…' : '删除账号',
+          danger: true,
+          onTap: deleting ? null : _confirmDelete,
+        ),
+      ],
+    ),
+  );
+}
+
+/// 隐私政策 / 用户协议的阅读面板：直接渲染随 App 打包的同一份 markdown
+/// （发布用的 HTML 由 scripts/build-legal.mjs 从同一份文件生成，避免两处维护）
+class LegalSheet extends StatelessWidget {
+  const LegalSheet({super.key, required this.title, required this.asset});
+  final String title;
+  final String asset;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    height: MediaQuery.of(context).size.height * .82,
+    padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
+    decoration: const BoxDecoration(
+      color: Colors.white,
+      borderRadius: BorderRadius.vertical(top: Radius.circular(25)),
+    ),
+    child: SafeArea(
+      top: false,
+      child: Column(
+        children: [
+          Container(
+            width: 38,
+            height: 4,
+            decoration: BoxDecoration(
+              color: line,
+              borderRadius: BorderRadius.circular(4),
+            ),
+          ),
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  title,
+                  style: const TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+              IconButton(
+                onPressed: () => Navigator.of(context).pop(),
+                icon: const Icon(Icons.close_rounded, color: muted),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Expanded(
+            child: FutureBuilder<String>(
+              future: DefaultAssetBundle.of(context).loadString(asset),
+              builder: (context, snapshot) {
+                final data = snapshot.data;
+                if (snapshot.hasError || (snapshot.hasData && data == null)) {
+                  return const Center(
+                    child: Text(
+                      '内容加载失败，请稍后再试。',
+                      style: TextStyle(color: muted2, fontSize: 13),
+                    ),
+                  );
+                }
+                if (data == null) {
+                  return const Center(
+                    child: SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                  );
+                }
+                // MarkdownBody 自身不滚动，长文必须套一层滚动容器
+                return SingleChildScrollView(
+                  padding: const EdgeInsets.only(bottom: 28),
+                  child: MarkdownBody(data: data, styleSheet: _legalStyle),
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+final MarkdownStyleSheet _legalStyle = MarkdownStyleSheet(
+  h1: const TextStyle(fontSize: 19, fontWeight: FontWeight.w700, color: ink),
+  h2: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: ink),
+  h3: const TextStyle(fontSize: 14.5, fontWeight: FontWeight.w700, color: ink),
+  p: const TextStyle(fontSize: 14, height: 1.75, color: Color(0xFF4A4A63)),
+  listBullet: const TextStyle(fontSize: 14, height: 1.75, color: Color(0xFF4A4A63)),
+  a: const TextStyle(color: purple),
+);
+
+/// 意见反馈 / 内容举报：写进 explore_feedback，只有本人能写、本人能读
+class FeedbackSheet extends StatefulWidget {
+  const FeedbackSheet({super.key, required this.store});
+  final ExploreStore store;
+
+  @override
+  State<FeedbackSheet> createState() => _FeedbackSheetState();
+}
+
+class _FeedbackSheetState extends State<FeedbackSheet> {
+  final controller = TextEditingController();
+  String category = 'feedback';
+  bool submitting = false;
+  String? error;
+
+  @override
+  void dispose() {
+    controller.dispose();
+    super.dispose();
+  }
+
+  Future<void> submit() async {
+    if (submitting) return;
+    final content = controller.text.trim();
+    if (content.isEmpty) {
+      setState(() => error = '写点什么再发送吧。');
+      return;
+    }
+    setState(() {
+      submitting = true;
+      error = null;
+    });
+    try {
+      await widget.store.submitFeedback(category: category, content: content);
+      if (!mounted) return;
+      // 面板关掉之后还要用 ScaffoldMessenger，先取出来再 pop
+      final messenger = ScaffoldMessenger.of(context);
+      Navigator.of(context).pop();
+      messenger.showSnackBar(const SnackBar(content: Text('已经收到，谢谢你的反馈。')));
+    } on Object catch (_) {
+      if (!mounted) return;
+      setState(() {
+        submitting = false;
+        error = '提交失败，请检查网络后再试。';
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
+    child: Container(
+      padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(25)),
+      ),
+      child: SafeArea(
+        top: false,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Center(
+              child: Container(
+                width: 38,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: line,
+                  borderRadius: BorderRadius.circular(4),
+                ),
+              ),
+            ),
+            const SizedBox(height: 18),
+            const Text(
+              '让探境知道哪里不对',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 6),
+            const Text(
+              '内容举报会优先处理：如果 AI 回复让你不适，选「内容举报」并说明是哪一段。',
+              style: TextStyle(color: muted, fontSize: 13, height: 1.6),
+            ),
+            const SizedBox(height: 14),
+            SegmentedButton<String>(
+              segments: const [
+                ButtonSegment(value: 'feedback', label: Text('意见反馈')),
+                ButtonSegment(value: 'content_report', label: Text('内容举报')),
+              ],
+              selected: {category},
+              showSelectedIcon: false,
+              onSelectionChanged: submitting
+                  ? null
+                  : (selection) => setState(() => category = selection.first),
+            ),
+            const SizedBox(height: 14),
+            TextField(
+              controller: controller,
+              minLines: 4,
+              maxLines: 8,
+              enabled: !submitting,
+              decoration: InputDecoration(
+                hintText: category == 'content_report' ? '哪一条回复、哪里不合适？' : '说说你的想法或遇到的问题……',
+                filled: true,
+                fillColor: Colors.white,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(14),
+                  borderSide: const BorderSide(color: line),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(14),
+                  borderSide: const BorderSide(color: line),
+                ),
+              ),
+            ),
+            if (error != null) ...[
+              const SizedBox(height: 10),
+              Text(
+                error!,
+                style: const TextStyle(color: Color(0xFFD75B50), fontSize: 12.5),
+              ),
+            ],
+            const SizedBox(height: 16),
+            PrimaryButton(
+              label: submitting ? '发送中…' : '发送',
+              icon: Icons.send_rounded,
+              onTap: submit,
+            ),
+          ],
+        ),
+      ),
     ),
   );
 }
