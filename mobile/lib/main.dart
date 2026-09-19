@@ -542,10 +542,20 @@ class ExploreStore extends ChangeNotifier {
     }
   }
 
+  /// 生成时间线总结中：按钮据此显示进行状态
+  bool timelineLoading = false;
+
   Future<void> generateTimelineSummary() async {
-    final summary = await const InsightService().generateTimelineSummary();
-    if (summary != null) {
-      timelineSummary = summary;
+    if (timelineLoading) return;
+    timelineLoading = true;
+    notifyListeners();
+    try {
+      final summary = await const InsightService().generateTimelineSummary();
+      if (summary != null) timelineSummary = summary;
+    } catch (error) {
+      remoteError = error.toString();
+    } finally {
+      timelineLoading = false;
       notifyListeners();
     }
   }
@@ -566,10 +576,24 @@ class ExploreStore extends ChangeNotifier {
     }
   }
 
-  Future<void> generateProfile() async {
-    final p = await const InsightService().generateProfile();
-    if (p != null) {
+  /// 生成画像中：按钮据此显示进行状态，避免点了没反应
+  bool profileLoading = false;
+
+  /// 生成画像；返回是否成功，界面据此提示失败
+  Future<bool> generateProfile() async {
+    if (profileLoading) return false;
+    profileLoading = true;
+    notifyListeners();
+    try {
+      final p = await const InsightService().generateProfile();
+      if (p == null) return false;
       profile = p;
+      return true;
+    } catch (error) {
+      remoteError = error.toString();
+      return false;
+    } finally {
+      profileLoading = false;
       notifyListeners();
     }
   }
@@ -1289,6 +1313,8 @@ class ExploreStore extends ChangeNotifier {
     reportLoading = false;
     analysisLoading = false;
     goalChatLoading = false;
+    profileLoading = false;
+    timelineLoading = false;
     progressUpdating = false;
     goalUpdating = false;
     goalCreateOrigin = ExplorePage.growth;
@@ -2526,9 +2552,16 @@ class _GrowthComposition extends StatelessWidget {
 }
 
 class _ProfileCard extends StatelessWidget {
-  const _ProfileCard({required this.profile, required this.onRegenerate});
+  const _ProfileCard({
+    required this.profile,
+    required this.onRegenerate,
+    this.busy = false,
+  });
   final Map<String, dynamic> profile;
   final VoidCallback onRegenerate;
+
+  /// 正在重新生成画像：按钮显示进行状态
+  final bool busy;
 
   Widget _tags(String key) {
     final v = profile[key];
@@ -2564,16 +2597,40 @@ class _ProfileCard extends StatelessWidget {
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
             const Eyebrow('我的画像'),
-            TextButton(
-              onPressed: onRegenerate,
-              style: TextButton.styleFrom(
-                padding: EdgeInsets.zero,
-                foregroundColor: purple,
-              ),
-              child: const Text(
-                '重新生成',
-                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700),
-              ),
+            AnimatedSwitcher(
+              duration: const Duration(milliseconds: 180),
+              child: busy
+                  ? const Row(
+                      key: ValueKey('busy'),
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _BusySpinner(size: 12, color: purple),
+                        SizedBox(width: 6),
+                        Text(
+                          '生成中…',
+                          style: TextStyle(
+                            color: purple,
+                            fontSize: 13,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ],
+                    )
+                  : TextButton(
+                      key: const ValueKey('idle'),
+                      onPressed: onRegenerate,
+                      style: TextButton.styleFrom(
+                        padding: EdgeInsets.zero,
+                        foregroundColor: purple,
+                      ),
+                      child: const Text(
+                        '重新生成',
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
             ),
           ],
         ),
@@ -3199,16 +3256,33 @@ class MemoryScreen extends StatelessWidget {
                   ),
                   const SizedBox(height: 10),
                   TextButton(
-                    onPressed: store.generateTimelineSummary,
+                    onPressed: store.timelineLoading
+                        ? null
+                        : store.generateTimelineSummary,
                     style: TextButton.styleFrom(
                       foregroundColor: purple,
                       padding: EdgeInsets.zero,
                     ),
-                    child: Text(
-                      store.timelineSummary != null ? '重新生成' : '生成总结',
-                      style: const TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w700,
+                    child: store.timelineLoading
+                        ? const Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              _BusySpinner(size: 12, color: purple),
+                              SizedBox(width: 6),
+                              Text(
+                                '生成中…',
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ],
+                          )
+                        : Text(
+                            store.timelineSummary != null ? '重新生成' : '生成总结',
+                            style: const TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w700,
                       ),
                     ),
                   ),
@@ -4915,6 +4989,8 @@ class _GoalDetailScreenState extends State<GoalDetailScreen> {
             PrimaryButton(
               label: '生成分析',
               icon: Icons.auto_awesome_rounded,
+              busy: widget.store.analysisLoading,
+              busyLabel: '正在生成…',
               onTap: () => widget.store.generateGoalAnalysis(goal),
             ),
           ],
@@ -4949,6 +5025,8 @@ class _GoalDetailScreenState extends State<GoalDetailScreen> {
               PrimaryButton(
                 label: '重新生成分析',
                 icon: Icons.auto_awesome_rounded,
+                busy: widget.store.analysisLoading,
+                busyLabel: '正在生成…',
                 onTap: () => widget.store.generateGoalAnalysis(goal),
               ),
             ],
@@ -4969,11 +5047,20 @@ class ReportScreen extends StatelessWidget {
   Widget build(BuildContext context) => Column(
     children: [
       const ExploreAppBar(title: '我的'),
-      Expanded(child: _body()),
+      Expanded(child: _body(context)),
     ],
   );
 
-  Widget _body() => AppScroll(
+  /// 重新生成画像并在失败时给出提示（生成接口失败时 store 里只有 remoteError，界面上看不到）
+  Future<void> _regenerateProfile(BuildContext context) async {
+    final ok = await store.generateProfile();
+    if (ok || !context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('生成失败，请稍后再试。')),
+    );
+  }
+
+  Widget _body(BuildContext context) => AppScroll(
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -4982,7 +5069,8 @@ class ReportScreen extends StatelessWidget {
         if (store.profile != null)
           _ProfileCard(
             profile: store.profile!,
-            onRegenerate: () => store.generateProfile(),
+            busy: store.profileLoading,
+            onRegenerate: () => _regenerateProfile(context),
           )
         else
           WhiteCard(
@@ -4999,7 +5087,9 @@ class ReportScreen extends StatelessWidget {
                 PrimaryButton(
                   label: '生成画像',
                   icon: Icons.auto_awesome_rounded,
-                  onTap: () => store.generateProfile(),
+                  busy: store.profileLoading,
+                  busyLabel: '正在生成…',
+                  onTap: () => _regenerateProfile(context),
                 ),
               ],
             ),
@@ -5384,10 +5474,28 @@ class _WeeklyReportBody extends StatelessWidget {
                       ? null
                       : () => store.generateWeeklyReport(),
                   style: TextButton.styleFrom(foregroundColor: purple),
-                  child: const Text(
-                    '重新生成周报',
-                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
-                  ),
+                  child: store.reportLoading
+                      ? const Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            _BusySpinner(size: 13, color: purple),
+                            SizedBox(width: 7),
+                            Text(
+                              '生成中…',
+                              style: TextStyle(
+                                fontSize: 14,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ],
+                        )
+                      : const Text(
+                          '重新生成周报',
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
                 ),
               ),
             ],
@@ -5483,28 +5591,60 @@ class Eyebrow extends StatelessWidget {
   );
 }
 
+/// 进行中的小转圈，放在按钮里表示「正在生成」
+class _BusySpinner extends StatelessWidget {
+  const _BusySpinner({super.key, this.size = 15, this.color = Colors.white});
+  final double size;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) => SizedBox(
+    width: size,
+    height: size,
+    child: CircularProgressIndicator(strokeWidth: 2, color: color),
+  );
+}
+
 class PrimaryButton extends StatelessWidget {
   const PrimaryButton({
     super.key,
     required this.label,
     required this.icon,
     required this.onTap,
+    this.busy = false,
+    this.busyLabel,
   });
   final String label;
   final IconData icon;
   final VoidCallback onTap;
 
+  /// 进行中：图标换成转圈、文案可换成「正在生成…」，并忽略点击避免重复提交
+  final bool busy;
+  final String? busyLabel;
+
   @override
   Widget build(BuildContext context) => FilledButton.icon(
-    onPressed: onTap,
-    icon: Icon(icon, size: 15),
-    label: Text(
-      label,
-      style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
+    onPressed: busy ? null : onTap,
+    icon: AnimatedSwitcher(
+      duration: const Duration(milliseconds: 180),
+      child: busy
+          ? const _BusySpinner(key: ValueKey('busy'))
+          : Icon(icon, size: 15, key: const ValueKey('idle')),
+    ),
+    label: AnimatedSwitcher(
+      duration: const Duration(milliseconds: 180),
+      child: Text(
+        busy ? (busyLabel ?? label) : label,
+        key: ValueKey(busy),
+        style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
+      ),
     ),
     style: FilledButton.styleFrom(
       backgroundColor: purple,
       foregroundColor: Colors.white,
+      // 进行中保持品牌色，只用透明度示意不可点，不要变成「坏了」的灰
+      disabledBackgroundColor: purple.withValues(alpha: .55),
+      disabledForegroundColor: Colors.white,
       padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 12),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(11)),
     ),

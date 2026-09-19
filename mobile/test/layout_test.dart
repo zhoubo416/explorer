@@ -597,6 +597,74 @@ void main() {
     expect(find.text('把方向收窄到一个场景'), findsOneWidget);
   });
 
+  // 生成类操作反馈：点了要有「进行中」的样子，并且不能重复触发
+  testWidgets('生成中按钮显示进行状态且点击无效', (tester) async {
+    var taps = 0;
+    await pumpPanel(
+      tester,
+      PrimaryButton(
+        label: '生成画像',
+        icon: Icons.auto_awesome_rounded,
+        busy: true,
+        busyLabel: '正在生成…',
+        onTap: () => taps++,
+      ),
+    );
+
+    expect(find.text('正在生成…'), findsOneWidget);
+    expect(find.text('生成画像'), findsNothing);
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+
+    await tester.tap(find.byType(PrimaryButton));
+    await tester.pump();
+    expect(taps, 0, reason: '进行中不应再触发一次生成');
+  });
+
+  testWidgets('空闲时按钮显示原文案且可点', (tester) async {
+    var taps = 0;
+    await pumpPanel(
+      tester,
+      PrimaryButton(
+        label: '生成画像',
+        icon: Icons.auto_awesome_rounded,
+        onTap: () => taps++,
+      ),
+    );
+
+    expect(find.text('生成画像'), findsOneWidget);
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    await tester.tap(find.byType(PrimaryButton));
+    expect(taps, 1);
+  });
+
+  testWidgets('我的页画像重新生成时显示生成中', (tester) async {
+    final store = seededStore();
+    await tester.binding.setSurfaceSize(const Size(390, 1200));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: AnimatedBuilder(
+            animation: store,
+            builder: (_, _) => ReportScreen(store: store),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('重新生成'), findsOneWidget);
+    store.profileLoading = true;
+    store.notifyListeners();
+    await tester.pump();
+    expect(find.text('生成中…'), findsOneWidget);
+    // AnimatedSwitcher 会短暂同时保留新旧内容，推进过动画时长再看旧文案是否移除
+    // （转圈是无限动画，不能用 pumpAndSettle）
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(find.text('重新生成'), findsNothing);
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+  });
+
   testWidgets('反馈面板内容为空时不发送', (tester) async {
     await pumpPanel(tester, FeedbackSheet(store: seededStore()));
     await tester.tap(find.text('发送'));
