@@ -2563,7 +2563,7 @@ class _ProfileCard extends StatelessWidget {
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            const Eyebrow('你的画像'),
+            const Eyebrow('我的画像'),
             TextButton(
               onPressed: onRegenerate,
               style: TextButton.styleFrom(
@@ -4989,7 +4989,7 @@ class ReportScreen extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const SectionTitle(eyebrow: '你的画像', title: '让探境更了解你'),
+                const SectionTitle(eyebrow: '我的画像', title: '让探境更了解你'),
                 const SizedBox(height: 8),
                 const Text(
                   '从你的记忆里提炼出性格、价值观与兴趣。',

@@ -33,7 +33,7 @@ function profileItems(key: string): string[] {
     </SectionHeading>
 
     <section class="profile-card">
-      <div class="profile-head"><span class="eyebrow">PROFILE · 你的画像</span><button class="quiet-link" type="button" @click="emit('generateProfile')">{{ props.profile ? '重新生成' : '生成画像' }}</button></div>
+      <div class="profile-head"><span class="eyebrow">PROFILE · 我的画像</span><button class="quiet-link" type="button" @click="emit('generateProfile')">{{ props.profile ? '重新生成' : '生成画像' }}</button></div>
       <h2>{{ props.profile?.ai_summary || '让探境更了解你' }}</h2>
       <template v-if="props.profile">
         <div v-for="group in [['personality', '性格'], ['values', '价值观'], ['interests', '兴趣'], ['strengths', '优势'], ['weaknesses', '待改进']]" :key="group[0]" class="profile-group">

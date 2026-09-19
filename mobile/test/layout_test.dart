@@ -549,7 +549,7 @@ void main() {
     expect(find.text('本周成长报告'), findsNothing, reason: '周报内容应移出我的页');
     expect(find.text('历史周报'), findsNothing, reason: '选周下拉已被列表页取代');
 
-    final profileY = tester.getRect(find.text('你的画像')).top;
+    final profileY = tester.getRect(find.text('我的画像')).top;
     final reportsY = tester.getRect(find.text('成长周报')).top;
     expect(profileY, lessThan(reportsY), reason: '画像要在周报入口之上');
   });
