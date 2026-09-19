@@ -508,4 +508,38 @@ void main() {
     await tester.pump();
     expect(find.text('写点什么再发送吧。'), findsOneWidget);
   });
+
+  // 换账号串数据：signOut 与重新登录都要清内存。以前 currentGoal 在 goals 为空时
+  // 会抛 StateError，所以退出登录不敢清数据，上一位用户的目标与记忆会留在内存里。
+  test('清空用户数据后不残留上一位用户的内容', () {
+    final store = seededStore();
+    expect(store.currentGoal, isNotNull);
+
+    store.clearUserData();
+
+    expect(store.goals, isEmpty);
+    expect(store.memories, isEmpty);
+    expect(store.conversations, isEmpty);
+    expect(store.messages, isEmpty);
+    expect(store.observations, isEmpty);
+    expect(store.profile, isNull);
+    expect(store.weeklyReport, isNull);
+    expect(store.currentGoal, isNull);
+    // 页面与导航回首页，登录后不会停在上一位用户的子页面
+    expect(store.page, ExplorePage.home);
+    expect(store.selectedNav, 0);
+    // 目标共创的开场白要留着，否则共创页首屏空白
+    expect(store.goalCreationMessages.length, 1);
+    expect(store.goalCreationMessages.first.content, goalCreationGreeting);
+  });
+
+  // 清空后各页面必须能按空态渲染：目标详情页过去直接假设 currentGoal 非空
+  testWidgets('清空数据后各页面按空态渲染不崩', (tester) async {
+    final store = seededStore()..clearUserData();
+    await pumpScreen(tester, HomeScreen(store: store));
+    await pumpScreen(tester, GrowthScreen(store: store));
+    await pumpScreen(tester, GoalDetailScreen(store: store));
+    await pumpScreen(tester, GoalCreateScreen(store: store));
+    expect(tester.takeException(), isNull);
+  });
 }

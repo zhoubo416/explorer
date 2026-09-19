@@ -186,10 +186,14 @@ class ExploreStore extends ChangeNotifier {
   bool goalChatLoading = false;
   final List<Map<String, dynamic>> actions = [];
 
-  Goal get currentGoal => goals.firstWhere(
-    (goal) => goal.id == selectedGoalId,
-    orElse: () => goals.first,
-  );
+  /// 当前目标；没有目标时返回 null（换账号、删号后会清空内存数据，
+  /// 页面此时应按「还没有目标」或加载中渲染，不能假设一定存在目标）
+  Goal? get currentGoal => goals.isEmpty
+      ? null
+      : goals.firstWhere(
+          (goal) => goal.id == selectedGoalId,
+          orElse: () => goals.first,
+        );
 
   /// 兜底：把选中目标重置为主目标（列表按 is_main_goal 排序时首位即主目标）
   void _resetSelectedGoalToMain() {
@@ -207,6 +211,11 @@ class ExploreStore extends ChangeNotifier {
     if (client == null || client.auth.currentUser == null || remoteLoading) {
       return;
     }
+
+    // 换账号后先把上一位用户的数据清干净：远端返回空时下面的赋值不会覆盖
+    // 内存里的旧数据，_applyCachedData 也会因为内存非空而跳过新用户的缓存，
+    // 两个守卫叠加会让新旧账号的数据串在一起
+    clearUserData();
 
     remoteLoading = true;
     remoteError = null;
@@ -1150,6 +1159,7 @@ class ExploreStore extends ChangeNotifier {
   Future<void> changeGoalProgress(int delta) async {
     if (progressUpdating) return;
     final goal = currentGoal;
+    if (goal == null) return;
     final nextProgress = (goal.progress + delta).clamp(0, 100);
     if (nextProgress == goal.progress) return;
 
@@ -1183,6 +1193,7 @@ class ExploreStore extends ChangeNotifier {
   }) async {
     if (goalUpdating) return false;
     final goal = currentGoal;
+    if (goal == null) return false;
     final previous = (
       title: goal.title,
       description: goal.description,
@@ -1231,14 +1242,56 @@ class ExploreStore extends ChangeNotifier {
     }
   }
 
+  /// 清空内存里的用户数据。换账号登录、退出登录、删号后都要调，
+  /// 否则上一位用户的目标与记忆会留在内存里被下一位用户看到。
+  /// 调用后 currentGoal 为 null，相关页面按空态渲染。
+  void clearUserData() {
+    goals.clear();
+    memories.clear();
+    messages.clear();
+    conversations.clear();
+    observations.clear();
+    reports.clear();
+    actions.clear();
+    goalMemories.clear();
+    goalStages.clear();
+    profile = null;
+    weeklyReport = null;
+    goalAnalysis = null;
+    timelineSummary = null;
+    dailySuggestion = '';
+    goalDraft = null;
+    lowMood = false;
+    selectedGoalId = '';
+    activeSessionId = null;
+    activeConversationIndex = 0;
+    remoteError = null;
+    remoteLoading = false;
+    reportLoading = false;
+    analysisLoading = false;
+    goalChatLoading = false;
+    progressUpdating = false;
+    goalUpdating = false;
+    goalCreateOrigin = ExplorePage.growth;
+    _pendingNewChat = false;
+    // 页面与导航回到首页：登录后不该停在上一位用户离开时的子页面
+    page = ExplorePage.home;
+    selectedNav = 0;
+    growthTab = GrowthTab.goal;
+    detailTab = DetailTab.overview;
+    memoryFilter = '全部';
+    // 目标共创的开场白要保留，其余共创过程清掉
+    goalCreationMessages
+      ..clear()
+      ..add(ChatMessage(isUser: false, content: goalCreationGreeting, time: ''));
+    notifyListeners();
+  }
+
   Future<void> signOut() async {
     final client = SupabaseService.client;
     if (client == null) return;
     await const AuthService().signOut();
-    activeSessionId = null;
-    _pendingNewChat = false;
-    remoteError = null;
-    notifyListeners();
+    clearUserData();
   }
 
   /// 删除账号：服务端删掉 auth 用户（业务数据随外键级联清空），
@@ -2150,9 +2203,9 @@ class HomeScreen extends StatelessWidget {
             _EmptyGoalCard(store: store)
           else
             GoalTile(
-              goal: store.currentGoal,
+              goal: store.currentGoal!,
               featured: true,
-              onTap: () => store.openGoal(store.currentGoal),
+              onTap: () => store.openGoal(store.currentGoal!),
             ),
           const SizedBox(height: 28),
           SectionTitle(
@@ -2648,7 +2701,7 @@ class _HeroCard extends StatelessWidget {
         Text(
           store.goals.isEmpty
               ? '你正在靠近\n「一个属于你的方向」。'
-              : '你正在靠近\n「${store.currentGoal.title}」。',
+              : '你正在靠近\n「${store.currentGoal!.title}」。',
           style: const TextStyle(
             fontSize: 22,
             height: 1.25,
@@ -2659,7 +2712,7 @@ class _HeroCard extends StatelessWidget {
         Text(
           store.goals.isEmpty
               ? '还没有目标。先和探境聊聊，一起找到第一步。'
-              : '下一步：${store.dailySuggestion.isNotEmpty ? store.dailySuggestion : (store.currentGoal.milestone.isEmpty ? '从一个小行动开始' : store.currentGoal.milestone)}。',
+              : '下一步：${store.dailySuggestion.isNotEmpty ? store.dailySuggestion : (store.currentGoal!.milestone.isEmpty ? '从一个小行动开始' : store.currentGoal!.milestone)}。',
           style: const TextStyle(
             color: muted,
             fontSize: 14,
@@ -2863,7 +2916,7 @@ class _GrowthGoalView extends StatelessWidget {
               padding: const EdgeInsets.only(bottom: 12),
               child: GoalTile(
                 goal: goal,
-                featured: goal.id == store.currentGoal.id,
+                featured: goal.id == store.currentGoal?.id,
                 onTap: () => store.openGoal(goal),
               ),
             ),
@@ -4195,6 +4248,10 @@ class _GoalDetailScreenState extends State<GoalDetailScreen> {
 
   Widget _scroll() {
     final goal = widget.store.currentGoal;
+    // 换账号后内存被清空、或数据还在加载时的兜底，等数据到了会自动重建
+    if (goal == null) {
+      return const Center(child: CircularProgressIndicator());
+    }
     return AppScroll(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -4279,6 +4336,7 @@ class _GoalDetailScreenState extends State<GoalDetailScreen> {
 
   Future<void> _showEditGoalSheet() async {
     final goal = widget.store.currentGoal;
+    if (goal == null) return;
     final titleController = TextEditingController(text: goal.title);
     final descriptionController = TextEditingController(text: goal.description);
     final milestoneController = TextEditingController(text: goal.milestone);
@@ -4800,6 +4858,7 @@ class _GoalDetailScreenState extends State<GoalDetailScreen> {
 
   Widget _analysis() {
     final goal = widget.store.currentGoal;
+    if (goal == null) return const SizedBox.shrink();
     if (widget.store.analysisLoading) {
       return const Padding(
         padding: EdgeInsets.symmetric(vertical: 60),
