@@ -59,6 +59,33 @@ void main() {
     await tester.tap(find.text('返回目标'));
     await tester.pumpAndSettle();
 
-    expect(find.text('我的成长方向'), findsOneWidget);
+    // 成长页大标题页首已并入顶栏，用「当前专注」卡片锚点确认落地
+    expect(find.text('当前专注'), findsOneWidget);
+  });
+
+  testWidgets('swiping from the left edge goes back on sub pages', (
+    WidgetTester tester,
+  ) async {
+    await tester.pumpWidget(const ExploreApp());
+
+    // 从首页进入目标创建页
+    await tester.ensureVisible(find.text('创建第一个目标'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('创建第一个目标'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('与探境共创目标'), findsOneWidget);
+
+    // 从左边缘向右滑，应返回进入前的首页
+    await tester.dragFrom(const Offset(10, 300), const Offset(220, 0));
+    await tester.pumpAndSettle();
+
+    expect(find.text('${greetingFor(DateTime.now())} ✦'), findsOneWidget);
+
+    // 一级页面不启用边缘手势：再滑也不会离开首页
+    await tester.dragFrom(const Offset(10, 300), const Offset(220, 0));
+    await tester.pumpAndSettle();
+
+    expect(find.text('${greetingFor(DateTime.now())} ✦'), findsOneWidget);
   });
 }

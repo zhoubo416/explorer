@@ -23,6 +23,14 @@ const mintBg = Color(0xFFE5F8F1);
 const coralBg = Color(0xFFFFF0EC);
 const amberBg = Color(0xFFFFF4D9);
 
+/// 新会话的 AI 开场白：空会话先展示，发出第一条消息时随会话落库（见 _persistMessage）
+const chatGreeting =
+    '你好，我是探境。最近过得怎么样？开心的、烦心的，或者还没想明白的事，都可以随时说给我听。';
+
+/// 目标共创的开场白：原「为什么从对话开始」说明文案并入这里
+const goalCreationGreeting =
+    '你好，我是探境。目标不是一开始就完美的答案，而是你愿意先靠近的一条路——不用先想清楚，我们边走边发现。最近有没有一件事，你一直想做，但还没真正开始？';
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await SupabaseService.initialize();
@@ -63,6 +71,7 @@ class Goal {
     required this.accent,
     required this.milestone,
     this.rawStatus = 'exploring',
+    this.isMainGoal = false,
     List<Map<String, dynamic>>? stages,
   }) : stages = stages ?? [];
   final String id;
@@ -75,6 +84,9 @@ class Goal {
   final Color accent;
   String milestone;
   final String rawStatus;
+  /// 数据库 is_main_goal：一人同时只有一个主目标，
+  /// 首页「当前主目标」与对话的目标上下文、进度副作用都挂在它上面
+  bool isMainGoal;
   final List<Map<String, dynamic>> stages;
 }
 
@@ -143,8 +155,16 @@ class ExploreStore extends ChangeNotifier {
   String? activeSessionId;
   bool remoteLoading = false;
   String? remoteError;
+  /// 一次发送（含流式回复）是否进行中；进行中不刷新会话消息，避免和流式写入竞争
+  bool chatSending = false;
+  /// 「新对话」空态（手动新增或切换/新建主目标后）：进入对话页不自动恢复
+  /// 最近会话，直到下一条消息归属具体会话，或用户主动选回历史会话
+  bool _pendingNewChat = false;
   bool progressUpdating = false;
   bool goalUpdating = false;
+  /// 主目标切换写库链：连续快速切换时按顺序排队执行，
+  /// 避免两次「清旧+置新」交错撞一人一主目标的唯一索引
+  Future<void>? _mainGoalWrite;
   final List<Map<String, dynamic>> observations = [];
   Map<String, dynamic>? weeklyReport;
   final List<Map<String, dynamic>> reports = [];
@@ -153,14 +173,12 @@ class ExploreStore extends ChangeNotifier {
   String? timelineSummary;
   Map<String, dynamic>? profile;
   String dailySuggestion = '';
+  /// 快速连续切换主目标时，建议请求可能乱序返回；只认最后一次发起的
+  int _suggestionRequestSeq = 0;
   bool reportLoading = false;
   bool analysisLoading = false;
   final List<ChatMessage> goalCreationMessages = [
-    ChatMessage(
-      isUser: false,
-      content: '你好，我是探境。最近有没有一件事，你一直想做，但还没真正开始？',
-      time: '',
-    ),
+    ChatMessage(isUser: false, content: goalCreationGreeting, time: ''),
   ];
   Map<String, dynamic>? goalDraft;
   List<Map<String, dynamic>> goalStages = [];
@@ -171,6 +189,13 @@ class ExploreStore extends ChangeNotifier {
     (goal) => goal.id == selectedGoalId,
     orElse: () => goals.first,
   );
+
+  /// 兜底：把选中目标重置为主目标（列表按 is_main_goal 排序时首位即主目标）
+  void _resetSelectedGoalToMain() {
+    if (goals.isEmpty) return;
+    selectedGoalId =
+        goals.firstWhere((g) => g.isMainGoal, orElse: () => goals.first).id;
+  }
 
   List<ChatMessage> get visibleMessages => messages;
 
@@ -294,7 +319,7 @@ class ExploreStore extends ChangeNotifier {
         remoteError = firstError.toString();
       }
 
-      if (goals.isNotEmpty) selectedGoalId = goals.first.id;
+      _resetSelectedGoalToMain();
 
       // 原始行写回本地缓存,供下次冷启动秒开;某一路拉取失败时保留缓存里的
       // 旧值,避免把还好的缓存清掉;会话只存最近 20 个控制体积
@@ -435,7 +460,7 @@ class ExploreStore extends ChangeNotifier {
         dailySuggestion = suggestion;
       }
     }
-    if (goals.isNotEmpty) selectedGoalId = goals.first.id;
+    _resetSelectedGoalToMain();
     notifyListeners();
     return cache;
   }
@@ -445,9 +470,9 @@ class ExploreStore extends ChangeNotifier {
     final session = pair['session'] is Map
         ? Map<String, dynamic>.from(pair['session'] as Map)
         : <String, dynamic>{};
-    final mappedMessages = _rowsFrom(pair['messages'])
-        .map(_messageFromRow)
-        .toList();
+    // 消息一律按时间正序，本地缓存里存的旧数据可能是倒序（排序方向修复前落盘的）
+    final rows = _rowsFrom(pair['messages'])..sort(_byCreatedAt);
+    final mappedMessages = rows.map(_messageFromRow).toList();
     return ConversationSummary(
       id: session['id']?.toString(),
       title: session['title']?.toString() ?? '新的对话',
@@ -467,16 +492,25 @@ class ExploreStore extends ChangeNotifier {
           if (row is Map) Map<String, dynamic>.from(row),
       ];
 
+  /// 行按 created_at 从旧到新排；解析失败的时间排最前
+  int _byCreatedAt(Map<String, dynamic> a, Map<String, dynamic> b) {
+    final ta = DateTime.tryParse(a['created_at']?.toString() ?? '');
+    final tb = DateTime.tryParse(b['created_at']?.toString() ?? '');
+    return (ta ?? DateTime.fromMillisecondsSinceEpoch(0))
+        .compareTo(tb ?? DateTime.fromMillisecondsSinceEpoch(0));
+  }
+
   Map<String, dynamic>? _mapFrom(dynamic value) =>
       value is Map ? Map<String, dynamic>.from(value) : null;
 
   bool _isSameLocalDay(String? iso) {
     final saved = iso == null ? null : DateTime.tryParse(iso);
     if (saved == null) return false;
+    final local = saved.toLocal();
     final now = DateTime.now();
-    return saved.year == now.year &&
-        saved.month == now.month &&
-        saved.day == now.day;
+    return local.year == now.year &&
+        local.month == now.month &&
+        local.day == now.day;
   }
 
   Future<void> generateWeeklyReport() async {
@@ -527,9 +561,19 @@ class ExploreStore extends ChangeNotifier {
   }
 
   Future<void> loadDailySuggestion() async {
+    final request = ++_suggestionRequestSeq;
     final s = await const InsightService().dailySuggestion();
+    if (request != _suggestionRequestSeq) return;
     if (s != null) dailySuggestion = s;
     notifyListeners();
+  }
+
+  /// 主目标切换/新建/归档后重新取每日建议（按「目标+天」缓存，当天该目标
+  /// 首次会生成一次）。失败静默：建议丢了不影响目标操作本身。
+  Future<void> refreshDailySuggestionQuietly() async {
+    try {
+      await loadDailySuggestion();
+    } catch (_) {}
   }
 
   void selectReport(Map<String, dynamic> row) {
@@ -615,7 +659,13 @@ class ExploreStore extends ChangeNotifier {
   ];
 
   /// 跳转到指定页面。目标页之外的都会同步底部导航选中态。
-  void goToPage(ExplorePage target, {GrowthTab? tab}) {
+  /// [resetChat] 只在进入对话页时生效：把活跃会话重置为最近一次会话。
+  void goToPage(ExplorePage target, {GrowthTab? tab, bool resetChat = false}) {
+    // 切页前先收起键盘：销毁「还持有焦点的输入框」会留下未关闭的输入连接，
+    // iOS 输入法的飞行中消息会继续写已销毁的 controller，进而破坏 element 树
+    if (target != page) {
+      FocusManager.instance.primaryFocus?.unfocus();
+    }
     page = target;
     final index = navPages.indexOf(target);
     if (index >= 0) {
@@ -623,6 +673,11 @@ class ExploreStore extends ChangeNotifier {
       lowMood = false;
     }
     if (tab != null) growthTab = tab;
+    // 每次进对话页都从库里刷新会话消息，避免展示登录那一刻的旧快照；
+    // 重置入口（导航栏、首页快捷入口）直接定位到最近一次会话
+    if (target == ExplorePage.chat) {
+      refreshActiveConversation(toLatest: resetChat);
+    }
     notifyListeners();
   }
 
@@ -631,12 +686,79 @@ class ExploreStore extends ChangeNotifier {
     notifyListeners();
   }
 
+  // 覆盖在底部导航之上、带「返回」语义的子页面
+  static const Set<ExplorePage> subPages = {
+    ExplorePage.goalDetail,
+    ExplorePage.goalCreate,
+    ExplorePage.goalCreated,
+  };
+
+  bool get isSubPage => subPages.contains(page);
+
+  /// 子页面返回上级：详情与创建完成回成长方向页，创建页回到进入前的页面。
+  /// 与各子页面顶栏返回按钮的目的地保持一致。
+  void goBack() {
+    switch (page) {
+      case ExplorePage.goalCreate:
+        goToPage(goalCreateOrigin);
+      case ExplorePage.goalDetail || ExplorePage.goalCreated:
+        goToPage(ExplorePage.growth);
+      default:
+        break;
+    }
+  }
+
   void openGoal(Goal goal) {
     selectedGoalId = goal.id;
     goalAnalysis = null;
+    // 与 Web 端 selectGoal 对齐：点开非主目标即切换主目标，
+    // 首页「当前主目标」与对话的目标上下文、进度副作用随之切换
+    if (!goal.isMainGoal) unawaited(makeMainGoal(goal));
     loadGoalMemories(goal.id);
     detailTab = DetailTab.overview;
     goToPage(ExplorePage.goalDetail);
+  }
+
+  /// 把某个目标设为主目标：先乐观翻转本地标志，再两步写库（先清旧、再置新），
+  /// 失败回滚并报错。连续切换时排队串行执行，见 _mainGoalWrite。
+  Future<void> makeMainGoal(Goal goal) async {
+    final client = SupabaseService.client;
+    if (client == null || client.auth.currentUser == null) return;
+    final pending = _mainGoalWrite;
+    _mainGoalWrite = (pending ?? Future.value()).then((_) async {
+      if (goal.isMainGoal) return;
+      final previousFlags = {
+        for (final item in goals) item.id: item.isMainGoal,
+      };
+      for (final item in goals) {
+        item.isMainGoal = item.id == goal.id;
+      }
+      notifyListeners();
+      try {
+        await GoalRepository(client).setMainGoal(goal.id);
+        // 新目标配新对话：进对话页保持空态，而不是接着旧会话聊
+        _startNewChatForGoalSwitch();
+        // 每日建议按「目标+天」缓存：主目标换了重新取，不阻塞切换本身
+        unawaited(refreshDailySuggestionQuietly());
+      } catch (error) {
+        for (final item in goals) {
+          item.isMainGoal = previousFlags[item.id] ?? false;
+        }
+        remoteError = error.toString();
+        notifyListeners();
+      }
+    });
+    await _mainGoalWrite;
+  }
+
+  /// 切换/新建主目标后开启新对话。若还有流式回复在途则只记下标志，
+  /// 等发送结束再清（见 sendMessage 收尾）。
+  void _startNewChatForGoalSwitch() {
+    if (chatSending) {
+      _pendingNewChat = true;
+    } else {
+      startNewConversation();
+    }
   }
 
   Future<void> loadGoalMemories(String goalId) async {
@@ -670,6 +792,7 @@ class ExploreStore extends ChangeNotifier {
 
   void createGoal() {
     final draft = goalDraft;
+    final isFirstGoal = goals.isEmpty;
     final goal = Goal(
       id: 'goal-${DateTime.now().millisecondsSinceEpoch}',
       title: draft?['title']?.toString() ?? '未命名目标',
@@ -693,15 +816,9 @@ class ExploreStore extends ChangeNotifier {
     if (goals.length == 1) generateProfile();
     goalCreationMessages
       ..clear()
-      ..add(
-        ChatMessage(
-          isUser: false,
-          content: '你好，我是探境。最近有没有一件事，你一直想做，但还没真正开始？',
-          time: '',
-        ),
-      );
+      ..add(ChatMessage(isUser: false, content: goalCreationGreeting, time: ''));
     notifyListeners();
-    unawaited(_persistGoal(goal));
+    unawaited(_persistGoal(goal, isFirstGoal: isFirstGoal));
   }
 
   Future<void> sendGoalCreationMessage(String content) async {
@@ -841,6 +958,8 @@ class ExploreStore extends ChangeNotifier {
   Future<void> updateGoalStatus(String goalId, String status) async {
     final client = SupabaseService.client;
     if (client == null || client.auth.currentUser == null) return;
+    // _refreshMemoriesAndGoals 会把选中目标重置回主目标，先记下归档的是不是主目标
+    final wasMainGoal = goals.any((g) => g.id == goalId && g.isMainGoal);
     final goal = goals.firstWhere(
       (g) => g.id == goalId,
       orElse: () => goals.first,
@@ -861,30 +980,49 @@ class ExploreStore extends ChangeNotifier {
           .eq('id', goalId)
           .eq('user_id', client.auth.currentUser!.id);
       await _refreshMemoriesAndGoals();
+      // 归档的是主目标时，主目标落到其它目标上，建议跟着重新取
+      if (wasMainGoal && status == 'archived') {
+        unawaited(refreshDailySuggestionQuietly());
+      }
     } catch (error) {
       remoteError = error.toString();
       notifyListeners();
     }
   }
 
-  Future<void> _persistGoal(Goal goal) async {
+  Future<void> _persistGoal(
+    Goal goal, {
+    required bool isFirstGoal,
+  }) async {
     final client = SupabaseService.client;
     if (client == null || client.auth.currentUser == null) return;
     try {
+      // 首个目标直接带主目标标志落库；非首个目标插入后再切换主目标，
+      // 与「新建目标即当前专注」的页面展示语义保持一致
       final row = await GoalRepository(client).createGoal(
         title: goal.title,
         description: goal.description,
         successDefinition: goal.milestone,
         stages: goal.stages,
+        isMainGoal: isFirstGoal,
       );
       final remoteId = row['id']?.toString();
       if (remoteId != null) {
+        final saved = _goalFromRow(row);
         final localIndex = goals.indexWhere((item) => item.id == goal.id);
         if (localIndex >= 0) {
-          final saved = _goalFromRow(row);
           goals[localIndex] = saved;
           selectedGoalId = saved.id;
           notifyListeners();
+        }
+        if (!isFirstGoal) {
+          // 非首个目标：切换主目标（makeMainGoal 内部会顺带开启新对话）
+          await makeMainGoal(saved);
+        } else {
+          // 首个目标：没有旧主目标要清，但同样开启新对话
+          _startNewChatForGoalSwitch();
+          // 首个目标即主目标：建议从静态引导切换为按目标生成
+          unawaited(refreshDailySuggestionQuietly());
         }
       }
     } catch (error) {
@@ -894,7 +1032,7 @@ class ExploreStore extends ChangeNotifier {
   }
 
   void openChat({bool withLowMood = false}) {
-    goToPage(ExplorePage.chat);
+    goToPage(ExplorePage.chat, resetChat: true);
     lowMood = withLowMood;
     notifyListeners();
   }
@@ -906,6 +1044,8 @@ class ExploreStore extends ChangeNotifier {
       ..addAll(conversations[index].messages);
     activeConversationIndex = index;
     activeSessionId = conversations[index].id;
+    // 用户主动翻回历史会话：切换目标带来的新对话空态就此解除
+    _pendingNewChat = false;
     goToPage(ExplorePage.chat);
   }
 
@@ -914,11 +1054,87 @@ class ExploreStore extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 开始新对话：清空当前消息，下一条消息会创建一个新会话
+  /// 开始新对话：清空当前消息，下一条消息会创建一个新会话。
+  /// 空态会一直保持，期间进入对话页不会自动恢复最近会话（见 refreshActiveConversation）。
   void startNewConversation() {
+    _pendingNewChat = true;
     activeSessionId = null;
     messages.clear();
     notifyListeners();
+  }
+
+  /// 进入对话页时刷新当前会话的消息；[toLatest] 或没有活跃会话时定位到最近一次会话。
+  /// 发送中或首次全量加载进行中都不刷新，避免和流式写入、loadRemoteData 竞争。
+  Future<void> refreshActiveConversation({bool toLatest = false}) async {
+    final client = SupabaseService.client;
+    if (client == null ||
+        client.auth.currentUser == null ||
+        chatSending ||
+        remoteLoading) {
+      return;
+    }
+    final repository = ConversationRepository(client);
+    try {
+      // 「新增对话」空态：不自动恢复最近会话，保持空态等第一条消息
+      if (_pendingNewChat && activeSessionId == null) return;
+      var sessionId = activeSessionId;
+      // 重置到最近一次（导航栏、首页快捷入口），或没有活跃会话（「新增对话」后的空态）
+      Map<String, dynamic>? latestSession;
+      if (toLatest || sessionId == null) {
+        final sessions = await repository.listSessions();
+        if (sessions.isEmpty) return;
+        latestSession = sessions.first;
+        // 最近一次会话已隔天：进入对话页时开启新会话，旧话题从历史面板进入
+        if (!_isSameLocalDay(
+          latestSession['updated_at']?.toString() ??
+              latestSession['created_at']?.toString(),
+        )) {
+          startNewConversation();
+          return;
+        }
+        sessionId = latestSession['id']?.toString();
+        if (sessionId == null) return;
+        if (conversations.indexWhere((c) => c.id == sessionId) < 0) {
+          conversations.insert(
+            0,
+            _conversationFromPair({
+              'session': latestSession,
+              'messages': const [],
+            }),
+          );
+        }
+      }
+      final rows = await repository.listMessages(sessionId);
+      final fresh = [for (final row in rows) _messageFromRow(row)];
+      messages
+        ..clear()
+        ..addAll(fresh);
+      activeSessionId = sessionId;
+      final summaryIndex = conversations.indexWhere((c) => c.id == sessionId);
+      if (summaryIndex >= 0) {
+        activeConversationIndex = summaryIndex;
+        // 历史列表里同一条会话的消息与预览也换成刚拉到的；
+        // 定位到最近一次会话时顺带把时间也换成会话行的最新值
+        final conversation = conversations[summaryIndex];
+        conversation.messages
+          ..clear()
+          ..addAll(fresh);
+        conversations[summaryIndex] = ConversationSummary(
+          id: conversation.id,
+          title: conversation.title,
+          date: latestSession == null
+              ? conversation.date
+              : _dateLabel(
+                  latestSession['updated_at'] ?? latestSession['created_at'],
+                ),
+          preview: fresh.isEmpty ? conversation.preview : fresh.last.content,
+          messages: conversation.messages,
+        );
+      }
+      notifyListeners();
+    } catch (_) {
+      // 拉取失败保持现状，不打断用户
+    }
   }
 
   void showGoalDetail() {
@@ -1019,6 +1235,7 @@ class ExploreStore extends ChangeNotifier {
     if (client == null) return;
     await const AuthService().signOut();
     activeSessionId = null;
+    _pendingNewChat = false;
     remoteError = null;
     notifyListeners();
   }
@@ -1026,55 +1243,63 @@ class ExploreStore extends ChangeNotifier {
   Future<void> sendMessage(String value) async {
     final content = value.trim();
     if (content.isEmpty) return;
-    final isLowMood = lowMood;
-    final target = messages;
-    target.add(ChatMessage(isUser: true, content: content, time: timeNow()));
-    notifyListeners();
-    await _persistMessage(
-      role: 'user',
-      content: content,
-      mode: isLowMood ? 'low_mood' : 'normal',
-    );
-    if (!remoteEnabled || activeSessionId == null) {
-      remoteError = 'Supabase 未配置或未登录，无法获取 AI 回复。';
-      notifyListeners();
-      return;
-    }
-    // 占位消息：随流式增量不断替换，避免等待期间界面毫无反馈
-    var reply = '';
-    final replyTime = timeNow();
-    target.add(ChatMessage(isUser: false, content: '', time: replyTime));
-    final placeholderIndex = target.length - 1;
-    notifyListeners();
-    var lastPaintedAt = DateTime.now();
+    // 从落库用户消息到流式回复结束都算「发送中」，期间进入对话页不刷新消息
+    chatSending = true;
     try {
-      await const AiService().streamReply(
-        sessionId: activeSessionId!,
-        mode: isLowMood ? 'low_mood' : 'normal',
-        onDelta: (delta) {
-          reply += delta;
-          // 增量很碎（一秒可达几十段），节流重绘避免整帧重建过于频繁
-          final now = DateTime.now();
-          if (now.difference(lastPaintedAt).inMilliseconds < 60) return;
-          lastPaintedAt = now;
-          _replaceMessage(target, placeholderIndex, reply, replyTime);
-        },
-        onDone: (finalReply) async {
-          // 服务端交回的最终文本是权威版本（模型返回短纯文本时不会有增量），
-          // 顺带补画节流期间的最后一段
-          if (finalReply.isNotEmpty) reply = finalReply;
-          _replaceMessage(target, placeholderIndex, reply, replyTime);
-          _refreshActiveConversationPreview();
-          // 助手回复、记忆落库、向量化、目标阶段更新均由后端 explore-conversation 完成
-          await _refreshMemoriesAndGoals();
-        },
-      );
-    } catch (error) {
-      if (reply.isEmpty && placeholderIndex < target.length) {
-        target.removeAt(placeholderIndex);
-      }
-      remoteError = error.toString();
+      final isLowMood = lowMood;
+      final target = messages;
+      target.add(ChatMessage(isUser: true, content: content, time: timeNow()));
       notifyListeners();
+      await _persistMessage(
+        role: 'user',
+        content: content,
+        mode: isLowMood ? 'low_mood' : 'normal',
+      );
+      if (!remoteEnabled || activeSessionId == null) {
+        remoteError = 'Supabase 未配置或未登录，无法获取 AI 回复。';
+        notifyListeners();
+        return;
+      }
+      // 占位消息：随流式增量不断替换，避免等待期间界面毫无反馈
+      var reply = '';
+      final replyTime = timeNow();
+      target.add(ChatMessage(isUser: false, content: '', time: replyTime));
+      final placeholderIndex = target.length - 1;
+      notifyListeners();
+      var lastPaintedAt = DateTime.now();
+      try {
+        await const AiService().streamReply(
+          sessionId: activeSessionId!,
+          mode: isLowMood ? 'low_mood' : 'normal',
+          onDelta: (delta) {
+            reply += delta;
+            // 增量很碎（一秒可达几十段），节流重绘避免整帧重建过于频繁
+            final now = DateTime.now();
+            if (now.difference(lastPaintedAt).inMilliseconds < 60) return;
+            lastPaintedAt = now;
+            _replaceMessage(target, placeholderIndex, reply, replyTime);
+          },
+          onDone: (finalReply) async {
+            // 服务端交回的最终文本是权威版本（模型返回短纯文本时不会有增量），
+            // 顺带补画节流期间的最后一段
+            if (finalReply.isNotEmpty) reply = finalReply;
+            _replaceMessage(target, placeholderIndex, reply, replyTime);
+            _refreshActiveConversationPreview();
+            // 助手回复、记忆落库、向量化、目标阶段更新均由后端 explore-conversation 完成
+            await _refreshMemoriesAndGoals();
+          },
+        );
+      } catch (error) {
+        if (reply.isEmpty && placeholderIndex < target.length) {
+          target.removeAt(placeholderIndex);
+        }
+        remoteError = error.toString();
+        notifyListeners();
+      }
+    } finally {
+      // 切换目标时若这条消息的流式回复还在途，等结束后再清空会话，开启新对话
+      if (_pendingNewChat) startNewConversation();
+      chatSending = false;
     }
   }
 
@@ -1109,7 +1334,7 @@ class ExploreStore extends ChangeNotifier {
       if (goals.isNotEmpty &&
           (selectedGoalId.isEmpty ||
               !goals.any((g) => g.id == selectedGoalId))) {
-        selectedGoalId = goals.first.id;
+        _resetSelectedGoalToMain();
       }
       notifyListeners();
     } catch (error) {
@@ -1151,7 +1376,22 @@ class ExploreStore extends ChangeNotifier {
         title: '新的对话',
         mode: mode,
       );
+      // 消息已归属具体会话：切换目标带来的新对话空态就此解除
+      _pendingNewChat = false;
       if (shouldCreateSummary) {
+        // 新会话先落一条 AI 欢迎语（与目标共创的开场一致），失败不阻塞消息发送；
+        // 本地同步补上，避免发送后欢迎语凭空消失
+        try {
+          await repository.addMessage(
+            sessionId: activeSessionId!,
+            role: 'assistant',
+            content: chatGreeting,
+          );
+          messages.insert(
+            0,
+            ChatMessage(isUser: false, content: chatGreeting, time: ''),
+          );
+        } catch (_) {}
         conversations.insert(
           0,
           ConversationSummary(
@@ -1190,6 +1430,7 @@ class ExploreStore extends ChangeNotifier {
       icon: Icons.adjust_rounded,
       accent: purple,
       milestone: row['success_definition']?.toString() ?? '持续完成下一步行动',
+      isMainGoal: row['is_main_goal'] == true,
       stages: (row['stages'] is List)
           ? List<Map<String, dynamic>>.from(row['stages'])
           : [],
@@ -1636,29 +1877,43 @@ class ExploreShell extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: SafeArea(
-        child: AnimatedSwitcher(
-          duration: const Duration(milliseconds: 180),
-          reverseDuration: const Duration(milliseconds: 140),
-          switchInCurve: Curves.easeOutCubic,
-          switchOutCurve: Curves.easeIn,
-          transitionBuilder: (child, animation) {
-            final offset =
-                Tween<Offset>(
-                  begin: const Offset(0.012, 0),
-                  end: Offset.zero,
-                ).animate(
-                  CurvedAnimation(
-                    parent: animation,
-                    curve: Curves.easeOutCubic,
-                  ),
+      body: PopScope(
+        // 安卓系统返回：子页面先回上级，一级页面才允许退出应用
+        canPop: !store.isSubPage,
+        onPopInvokedWithResult: (didPop, _) {
+          if (!didPop) store.goBack();
+        },
+        child: _EdgeSwipeBack(
+          enabled: store.isSubPage,
+          onBack: store.goBack,
+          child: SafeArea(
+            child: AnimatedSwitcher(
+              duration: const Duration(milliseconds: 180),
+              reverseDuration: const Duration(milliseconds: 140),
+              switchInCurve: Curves.easeOutCubic,
+              switchOutCurve: Curves.easeIn,
+              transitionBuilder: (child, animation) {
+                final offset =
+                    Tween<Offset>(
+                      begin: const Offset(0.012, 0),
+                      end: Offset.zero,
+                    ).animate(
+                      CurvedAnimation(
+                        parent: animation,
+                        curve: Curves.easeOutCubic,
+                      ),
+                    );
+                return FadeTransition(
+                  opacity: animation,
+                  child: SlideTransition(position: offset, child: child),
                 );
-            return FadeTransition(
-              opacity: animation,
-              child: SlideTransition(position: offset, child: child),
-            );
-          },
-          child: KeyedSubtree(key: ValueKey(store.page), child: _page(context)),
+              },
+              child: KeyedSubtree(
+                key: ValueKey(store.page),
+                child: _page(context),
+              ),
+            ),
+          ),
         ),
       ),
       bottomNavigationBar: _bottomNav(),
@@ -1684,38 +1939,104 @@ class ExploreShell extends StatelessWidget {
     }
   }
 
-  Widget _bottomNav() {
+  /// 共创目标页不显示底部导航。这里必须返回 null，不能用 `SizedBox.shrink()` 占位：
+  /// Scaffold 只要发现 bottomNavigationBar 非空，就会把 body 的底部安全区一起去掉
+  /// （它假定底栏自己消费了这段安全区，见 Scaffold 源码里的 removeBottomPadding），
+  /// 而零尺寸占位并不消费安全区，页面会连安全区一并丢掉、输入框贴到屏幕底边。
+  Widget? _bottomNav() {
     const items = [
       (Icons.home_rounded, '首页'),
       (Icons.insights_rounded, '成长'),
       (Icons.chat_bubble_outline_rounded, '对话'),
       (Icons.person_outline_rounded, '我的'),
     ];
-    final show = store.page != ExplorePage.goalCreate;
-    return show
-        ? Container(
-            decoration: const BoxDecoration(
-              color: Colors.white,
-              border: Border(top: BorderSide(color: line)),
+    if (store.page == ExplorePage.goalCreate) return null;
+    return Container(
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        border: Border(top: BorderSide(color: line)),
+      ),
+      child: NavigationBar(
+        height: 68,
+        selectedIndex: store.selectedNav,
+        backgroundColor: Colors.white,
+        indicatorColor: violetBg,
+        onDestinationSelected: (index) => store.goToPage(
+          ExploreStore.navPages[index],
+          // 从底部导航进对话页回到最近一次会话（resetChat 对其它页面无效）
+          resetChat: true,
+        ),
+        destinations: [
+          for (final item in items)
+            NavigationDestination(
+              icon: Icon(item.$1, size: 20),
+              selectedIcon: Icon(item.$1, size: 20),
+              label: item.$2,
             ),
-            child: NavigationBar(
-              height: 68,
-              selectedIndex: store.selectedNav,
-              backgroundColor: Colors.white,
-              indicatorColor: violetBg,
-              onDestinationSelected: (index) =>
-                  store.goToPage(ExploreStore.navPages[index]),
-              destinations: [
-                for (final item in items)
-                  NavigationDestination(
-                    icon: Icon(item.$1, size: 20),
-                    selectedIcon: Icon(item.$1, size: 20),
-                    label: item.$2,
-                  ),
-              ],
+        ],
+      ),
+    );
+  }
+}
+
+/// 「左滑返回」的轻量实现：整个应用是单路由状态切页、没有路由栈，
+/// 系统的边缘返回手势不会触发，于是在子页面里识别左边缘右滑来补齐。
+class _EdgeSwipeBack extends StatefulWidget {
+  const _EdgeSwipeBack({
+    required this.enabled,
+    required this.onBack,
+    required this.child,
+  });
+
+  final bool enabled;
+  final VoidCallback onBack;
+  final Widget child;
+
+  @override
+  State<_EdgeSwipeBack> createState() => _EdgeSwipeBackState();
+}
+
+class _EdgeSwipeBackState extends State<_EdgeSwipeBack> {
+  // 起点须落在左边缘区域内；滑出该距离或快速右甩时触发返回
+  static const double _edgeWidth = 24;
+  static const double _triggerDistance = 56;
+  static const double _flingVelocity = 500;
+
+  double _distance = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!widget.enabled) return widget.child;
+    // 手势条单独占左缘一条竖带、处于命中测试最上层：真机上手指滑动多是斜向，
+    // 若把识别器包在整页外层，它在手势竞技场里排在正文之后、斜向滑动会输给滚动；
+    // 独立竖带让边缘滑动稳定获胜，也不影响正文区域的任何手势。
+    return Stack(
+      children: [
+        Positioned.fill(child: widget.child),
+        Positioned(
+          left: 0,
+          top: 0,
+          bottom: 0,
+          width: _edgeWidth,
+          child: SafeArea(
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onHorizontalDragStart: (_) => _distance = 0,
+              onHorizontalDragUpdate: (details) =>
+                  _distance += details.primaryDelta ?? 0,
+              onHorizontalDragEnd: (details) {
+                final flingRight =
+                    details.velocity.pixelsPerSecond.dx >= _flingVelocity;
+                if (_distance >= _triggerDistance || flingRight) {
+                  widget.onBack();
+                }
+                _distance = 0;
+              },
             ),
-          )
-        : const SizedBox.shrink();
+          ),
+        ),
+      ],
+    );
   }
 }
 
@@ -1724,13 +2045,22 @@ class HomeScreen extends StatelessWidget {
   final ExploreStore store;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => Column(
+    children: [
+      ExploreAppBar(
+        leading: const Brand(),
+        actions: [_NotificationButton(store: store)],
+      ),
+      Expanded(child: _content()),
+    ],
+  );
+
+  Widget _content() {
     final greeting = greetingFor(DateTime.now());
     return AppScroll(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          AppHeader(store: store),
           if (store.actions.isNotEmpty) ...[
             const SizedBox(height: 16),
             _ProactiveBanner(
@@ -1811,99 +2141,170 @@ class HomeScreen extends StatelessWidget {
   }
 }
 
-class AppHeader extends StatelessWidget {
-  const AppHeader({super.key, required this.store});
+/// 统一顶栏：所有页面共用同一套高度、间距与排版，固定在滚动区之上。
+class ExploreAppBar extends StatelessWidget {
+  const ExploreAppBar({
+    super.key,
+    this.onBack,
+    this.backLabel = '返回',
+    this.leading,
+    this.title,
+    this.subtitle,
+    this.actions = const <Widget>[],
+  });
+
+  final VoidCallback? onBack;
+  final String backLabel;
+  final Widget? leading;
+  final String? title;
+  final String? subtitle;
+  final List<Widget> actions;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    height: 52,
+    color: pageBg,
+    padding: const EdgeInsets.fromLTRB(20, 0, 12, 0),
+    child: Row(
+      children: [
+        if (onBack != null)
+          TextButton.icon(
+            onPressed: onBack,
+            icon: const Icon(Icons.arrow_back_ios_new_rounded, size: 14),
+            label: Text(backLabel, style: const TextStyle(fontSize: 13)),
+            style: TextButton.styleFrom(
+              foregroundColor: muted,
+              padding: EdgeInsets.zero,
+            ),
+          ),
+        if (leading != null) ...[
+          if (onBack != null) const SizedBox(width: 14),
+          leading!,
+        ],
+        if (title != null || subtitle != null) ...[
+          if (onBack != null || leading != null) const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (title != null)
+                  Text(
+                    title!,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                if (subtitle != null)
+                  Text(
+                    subtitle!,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(color: muted, fontSize: 13),
+                  ),
+              ],
+            ),
+          ),
+        ] else
+          const Spacer(),
+        ...actions,
+      ],
+    ),
+  );
+}
+
+/// 首页顶栏的铃铛按钮，打开「探境的消息」面板
+class _NotificationButton extends StatelessWidget {
+  const _NotificationButton({required this.store});
   final ExploreStore store;
 
   @override
   Widget build(BuildContext context) {
-    return Row(
-      children: [
-        const Brand(),
-        const Spacer(),
-        IconButton(
-          onPressed: () {
-            showModalBottomSheet<void>(
-              context: context,
-              backgroundColor: Colors.white,
-              shape: const RoundedRectangleBorder(
-                borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
-              ),
-              builder: (ctx) => SafeArea(
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 18, 20, 24),
-                  child: SingleChildScrollView(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text(
-                          '探境的消息',
-                          style: TextStyle(
-                            fontSize: 18,
-                            fontWeight: FontWeight.w700,
+    return IconButton(
+      tooltip: '探境的消息',
+      onPressed: () {
+        showModalBottomSheet<void>(
+          context: context,
+          backgroundColor: Colors.white,
+          shape: const RoundedRectangleBorder(
+            borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+          ),
+          builder: (ctx) => SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(20, 18, 20, 24),
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      '探境的消息',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    if (store.actions.isEmpty)
+                      const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 20),
+                        child: Center(
+                          child: Text(
+                            '暂时没有新的消息。',
+                            style: TextStyle(color: muted, fontSize: 14),
                           ),
                         ),
-                        const SizedBox(height: 14),
-                        if (store.actions.isEmpty)
-                          const Padding(
-                            padding: EdgeInsets.symmetric(vertical: 20),
-                            child: Center(
-                              child: Text(
-                                '暂时没有新的消息。',
-                                style: TextStyle(color: muted, fontSize: 14),
+                      )
+                    else
+                      for (final action in store.actions)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 10),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Icon(
+                                Icons.auto_awesome_rounded,
+                                color: purple,
+                                size: 16,
                               ),
-                            ),
-                          )
-                        else
-                          for (final action in store.actions)
-                            Padding(
-                              padding: const EdgeInsets.only(bottom: 10),
-                              child: Row(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  const Icon(
-                                    Icons.auto_awesome_rounded,
-                                    color: purple,
-                                    size: 16,
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Text(
+                                  action['content']?.toString() ?? '',
+                                  style: const TextStyle(
+                                    color: Color(0xFF5C55A2),
+                                    fontSize: 14,
+                                    height: 1.5,
                                   ),
-                                  const SizedBox(width: 10),
-                                  Expanded(
-                                    child: Text(
-                                      action['content']?.toString() ?? '',
-                                      style: const TextStyle(
-                                        color: Color(0xFF5C55A2),
-                                        fontSize: 14,
-                                        height: 1.5,
-                                      ),
-                                    ),
-                                  ),
-                                  TextButton(
-                                    onPressed: () => store.dismissAction(
-                                      action['id']?.toString() ?? '',
-                                    ),
-                                    child: const Text(
-                                      '知道了',
-                                      style: TextStyle(fontSize: 13),
-                                    ),
-                                  ),
-                                ],
+                                ),
                               ),
-                            ),
-                      ],
-                    ),
-                  ),
+                              TextButton(
+                                onPressed: () => store.dismissAction(
+                                  action['id']?.toString() ?? '',
+                                ),
+                                child: const Text(
+                                  '知道了',
+                                  style: TextStyle(fontSize: 13),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                  ],
                 ),
               ),
-            );
-          },
-          icon: const Icon(
-            Icons.notifications_none_rounded,
-            color: muted,
-            size: 21,
+            ),
           ),
-        ),
-      ],
+        );
+      },
+      icon: const Icon(
+        Icons.notifications_none_rounded,
+        color: muted,
+        size: 21,
+      ),
     );
   }
 }
@@ -1914,19 +2315,13 @@ class Brand extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Row(
     children: [
-      Container(
-        width: 30,
-        height: 30,
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(10),
-          gradient: const LinearGradient(
-            colors: [Color(0xFF8CDDF4), Color(0xFF6658E8)],
-          ),
-        ),
-        child: const Icon(
-          Icons.smart_toy_outlined,
-          color: Colors.white,
-          size: 18,
+      ClipRRect(
+        borderRadius: BorderRadius.circular(10),
+        child: Image.asset(
+          'assets/logo.png',
+          width: 30,
+          height: 30,
+          fit: BoxFit.cover,
         ),
       ),
       const SizedBox(width: 9),
@@ -2330,6 +2725,7 @@ class GrowthScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Column(
     children: [
+      const ExploreAppBar(title: '成长'),
       _GrowthTabBar(store: store),
       Expanded(
         child: store.growthTab == GrowthTab.memory
@@ -2386,8 +2782,7 @@ class _GrowthGoalView extends StatelessWidget {
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        PageTop(title: '我的成长方向', subtitle: '目标不是任务，而是你正在成为的那个人。'),
-        const SizedBox(height: 24),
+        const SizedBox(height: 4),
         Container(
           width: double.infinity,
           padding: const EdgeInsets.all(20),
@@ -2611,7 +3006,8 @@ class MemoryScreen extends StatelessWidget {
                 ),
                 const SizedBox(height: 8),
                 TextButton(
-                  onPressed: () => store.goToPage(ExplorePage.chat),
+                  onPressed: () =>
+                      store.goToPage(ExplorePage.chat, resetChat: true),
                   style: TextButton.styleFrom(
                     foregroundColor: purple,
                     padding: EdgeInsets.zero,
@@ -2655,8 +3051,7 @@ class MemoryScreen extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          PageTop(title: '记忆，是理解的开始', subtitle: '那些重要的时刻，会在未来合适的时候回到你身边。'),
-          const SizedBox(height: 24),
+          const SizedBox(height: 4),
           Container(
             width: double.infinity,
             padding: const EdgeInsets.all(22),
@@ -2832,12 +3227,31 @@ class ChatScreen extends StatefulWidget {
 
 class _ChatScreenState extends State<ChatScreen> {
   final controller = TextEditingController();
+  final inputFocus = FocusNode();
+
+  @override
+  void initState() {
+    super.initState();
+    // 开始输入（键盘弹起或输入了文字）时收起建议区，避免它挤压、遮挡消息
+    inputFocus.addListener(_refreshTypingState);
+    controller.addListener(_refreshTypingState);
+  }
 
   @override
   void dispose() {
+    inputFocus.removeListener(_refreshTypingState);
+    controller.removeListener(_refreshTypingState);
+    inputFocus.dispose();
     controller.dispose();
     super.dispose();
   }
+
+  void _refreshTypingState() {
+    if (!mounted) return;
+    setState(() {});
+  }
+
+  bool get typing => inputFocus.hasFocus || controller.text.isNotEmpty;
 
   void send() {
     widget.store.sendMessage(controller.text);
@@ -2856,101 +3270,106 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   Widget build(BuildContext context) => Column(
     children: [
-      Padding(
-        padding: const EdgeInsets.fromLTRB(20, 8, 20, 13),
-        child: Row(
-          children: [
-            const AgentAvatar(),
-            const SizedBox(width: 10),
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  widget.store.lowMood ? '成长陪伴' : '探境',
-                  style: const TextStyle(
-                    fontWeight: FontWeight.w700,
-                    fontSize: 14.5,
-                  ),
-                ),
-                Text(
-                  widget.store.lowMood ? '我会陪你慢慢聊' : 'AI 成长伙伴',
-                  style: const TextStyle(color: muted, fontSize: 13),
-                ),
-              ],
-            ),
-            const Spacer(),
-            if (!widget.store.lowMood)
-              IconButton(
-                tooltip: '新增对话',
-                onPressed: widget.store.startNewConversation,
-                icon: const Icon(
-                  Icons.add_comment_outlined,
-                  color: muted,
-                  size: 20,
-                ),
-              ),
+      ExploreAppBar(
+        title: '对话',
+        actions: [
+          if (!widget.store.lowMood)
             IconButton(
-              tooltip: '历史会话',
-              onPressed: showHistory,
-              icon: const Icon(Icons.history_rounded, color: muted, size: 20),
-            ),
-            if (widget.store.lowMood)
-              TextButton(
-                onPressed: () {
-                  widget.store.exitLowMood();
-                },
-                child: const Text(
-                  '返回日常',
-                  style: TextStyle(color: purple, fontSize: 13),
-                ),
+              tooltip: '新增对话',
+              onPressed: widget.store.startNewConversation,
+              visualDensity: VisualDensity.compact,
+              icon: const Icon(
+                Icons.add_comment_outlined,
+                color: muted,
+                size: 20,
               ),
-          ],
-        ),
+            ),
+          IconButton(
+            tooltip: '历史会话',
+            onPressed: showHistory,
+            visualDensity: VisualDensity.compact,
+            icon: const Icon(Icons.history_rounded, color: muted, size: 20),
+          ),
+          if (widget.store.lowMood)
+            TextButton(
+              onPressed: () {
+                widget.store.exitLowMood();
+              },
+              child: const Text(
+                '返回日常',
+                style: TextStyle(color: purple, fontSize: 13),
+              ),
+            ),
+        ],
       ),
       Expanded(
-        // reverse: true 让列表默认停在最新消息处（视觉底部），新消息和流式回复也自动贴底
         child: GestureDetector(
           // 点按消息区域任意位置收起键盘
           behavior: HitTestBehavior.opaque,
           onTap: () => FocusManager.instance.primaryFocus?.unfocus(),
-          child: ListView(
-            reverse: true,
-            keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
-            padding: const EdgeInsets.fromLTRB(20, 11, 20, 11),
+          child: Column(
             children: [
-              _ChatSuggestions(store: widget.store, controller: controller),
-              const SizedBox(height: 12),
-              for (final message in widget.store.visibleMessages.reversed)
-                ChatBubble(message: message),
-              const SizedBox(height: 20),
-              if (widget.store.lowMood)
-                Container(
-                  margin: const EdgeInsets.symmetric(vertical: 18),
-                  padding: const EdgeInsets.all(11),
-                  decoration: BoxDecoration(
-                    color: violetBg,
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: const Row(
-                    children: [
-                      Icon(Icons.auto_awesome_rounded, size: 15, color: purple),
-                      SizedBox(width: 7),
-                      Expanded(
-                        child: Text(
-                          '你不用现在就解决所有问题，我们先一起理解它。',
-                          style: TextStyle(
-                            color: muted,
-                            fontSize: 13,
-                          ),
-                        ),
-                      ),
-                    ],
+              // 空会话：AI 欢迎语固定在消息区顶部（与目标共创的开场一致）；
+              // 发出第一条消息时由 _persistMessage 落库，此后保留在会话历史里
+              if (widget.store.messages.isEmpty)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 11, 20, 0),
+                  child: ChatBubble(
+                    key: const ValueKey('chat-greeting'),
+                    message: ChatMessage(
+                      isUser: false,
+                      content: chatGreeting,
+                      time: '',
+                    ),
                   ),
                 ),
-              Center(
-                child: Text(
-                  '今天 · 8 月 9 日',
-                  style: const TextStyle(color: muted2, fontSize: 13),
+              Expanded(
+                // reverse: true 让列表默认停在最新消息处（视觉底部），新消息和流式回复也自动贴底
+                child: ListView(
+                  reverse: true,
+                  keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+                  padding: const EdgeInsets.fromLTRB(20, 11, 20, 11),
+                  children: [
+                    if (!typing) ...[
+                      _ChatSuggestions(store: widget.store, controller: controller),
+                      const SizedBox(height: 12),
+                    ],
+                    for (final message in widget.store.visibleMessages.reversed)
+                      // key 让消息在建议区收起/展开（列表头部增删）时保持元素对位，
+                      // 否则 MarkdownBody 会按索引错位复用，销毁时可能触发断言
+                      ChatBubble(key: ValueKey(message), message: message),
+                    const SizedBox(height: 20),
+                    if (widget.store.lowMood)
+                      Container(
+                        margin: const EdgeInsets.symmetric(vertical: 18),
+                        padding: const EdgeInsets.all(11),
+                        decoration: BoxDecoration(
+                          color: violetBg,
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: const Row(
+                          children: [
+                            Icon(Icons.auto_awesome_rounded, size: 15, color: purple),
+                            SizedBox(width: 7),
+                            Expanded(
+                              child: Text(
+                                '你不用现在就解决所有问题，我们先一起理解它。',
+                                style: TextStyle(
+                                  color: muted,
+                                  fontSize: 13,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    Center(
+                      child: Text(
+                        '今天 · 8 月 9 日',
+                        style: const TextStyle(color: muted2, fontSize: 13),
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ],
@@ -2964,6 +3383,7 @@ class _ChatScreenState extends State<ChatScreen> {
             Expanded(
               child: TextField(
                 controller: controller,
+                focusNode: inputFocus,
                 minLines: 1,
                 maxLines: 4,
                 decoration: InputDecoration(
@@ -3374,29 +3794,25 @@ class _GoalCreateScreenState extends State<GoalCreateScreen> {
   }
 
   @override
-  Widget build(BuildContext context) => AppScroll(
+  Widget build(BuildContext context) => Column(
+    children: [
+      ExploreAppBar(
+        onBack: () => widget.store.goToPage(widget.store.goalCreateOrigin),
+        backLabel: widget.store.goalCreateOrigin == ExplorePage.home
+            ? '返回首页'
+            : '返回目标',
+        title: '与探境共创目标',
+      ),
+      Expanded(child: _body()),
+      _composer(),
+    ],
+  );
+
+  Widget _body() => AppScroll(
     controller: _scrollController,
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        BackButtonLine(
-          label: widget.store.goalCreateOrigin == ExplorePage.home
-              ? '返回首页'
-              : '返回目标',
-          onTap: () => widget.store.goToPage(widget.store.goalCreateOrigin),
-        ),
-        const SizedBox(height: 18),
-        Row(
-          children: [
-            const AgentAvatar(),
-            const SizedBox(width: 10),
-            const Text(
-              '与探境共创目标',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
-            ),
-          ],
-        ),
-        const SizedBox(height: 22),
         for (final message in widget.store.goalCreationMessages)
           ChatBubble(message: message),
         if (widget.store.goalChatLoading)
@@ -3411,71 +3827,44 @@ class _GoalCreateScreenState extends State<GoalCreateScreen> {
             ),
           ),
         if (widget.store.goalDraft != null) _GoalPreview(store: widget.store),
-        Padding(
-          padding: const EdgeInsets.only(top: 15),
-          child: Row(
-            children: [
-              Expanded(
-                child: TextField(
-                  controller: controller,
-                  decoration: InputDecoration(
-                    hintText: '输入你的想法……',
-                    filled: true,
-                    fillColor: Colors.white,
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(14),
-                      borderSide: const BorderSide(color: line),
-                    ),
-                    enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(14),
-                      borderSide: const BorderSide(color: line),
-                    ),
-                  ),
-                ),
+      ],
+    ),
+  );
+
+  // 底部导航在本页返回 null，body 因此保留底部安全区（见 _bottomNav），
+  // 输入框与其它页面的输入框一样，只需在安全区之上留一段常规留白
+  Widget _composer() => Padding(
+    padding: const EdgeInsets.fromLTRB(14, 7, 14, 12),
+    child: Row(
+      children: [
+        Expanded(
+          child: TextField(
+            controller: controller,
+            decoration: InputDecoration(
+              hintText: '输入你的想法……',
+              filled: true,
+              fillColor: Colors.white,
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(14),
+                borderSide: const BorderSide(color: line),
               ),
-              const SizedBox(width: 8),
-              CircleButton(
-                icon: Icons.arrow_upward_rounded,
-                onTap: () {
-                  final text = controller.text.trim();
-                  if (text.isNotEmpty) {
-                    controller.clear();
-                    widget.store.sendGoalCreationMessage(text);
-                  }
-                },
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(14),
+                borderSide: const BorderSide(color: line),
               ),
-            ],
+            ),
           ),
         ),
-        const SizedBox(height: 27),
-        Container(
-          width: double.infinity,
-          padding: const EdgeInsets.all(20),
-          decoration: BoxDecoration(
-            color: violetBg,
-            borderRadius: BorderRadius.circular(18),
-          ),
-          child: const Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Eyebrow('为什么从对话开始'),
-              SizedBox(height: 10),
-              Text(
-                '不用先想清楚，\n我们边走边发现。',
-                style: TextStyle(
-                  color: purple,
-                  fontWeight: FontWeight.w700,
-                  fontSize: 21,
-                  height: 1.35,
-                ),
-              ),
-              SizedBox(height: 8),
-              Text(
-                '目标不是一开始就完美的答案，而是你愿意先靠近的一条路。',
-                style: TextStyle(color: muted, fontSize: 13, height: 1.7),
-              ),
-            ],
-          ),
+        const SizedBox(width: 8),
+        CircleButton(
+          icon: Icons.arrow_upward_rounded,
+          onTap: () {
+            final text = controller.text.trim();
+            if (text.isNotEmpty) {
+              controller.clear();
+              widget.store.sendGoalCreationMessage(text);
+            }
+          },
         ),
       ],
     ),
@@ -3567,6 +3956,18 @@ class GoalCreatedScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    return Column(
+      children: [
+        ExploreAppBar(
+          onBack: () => store.goToPage(ExplorePage.growth),
+          backLabel: '返回成长方向',
+        ),
+        Expanded(child: _content()),
+      ],
+    );
+  }
+
+  Widget _content() {
     final goal = store.goals.isEmpty ? null : store.currentGoal;
     return AppScroll(
       child: Column(
@@ -3741,30 +4142,34 @@ class _GoalDetailScreenState extends State<GoalDetailScreen> {
 
   @override
   Widget build(BuildContext context) {
+    return Column(
+      children: [
+        ExploreAppBar(
+          onBack: () => widget.store.goToPage(ExplorePage.growth),
+          backLabel: '返回成长方向',
+          actions: [
+            IconButton(
+              tooltip: '编辑目标',
+              visualDensity: VisualDensity.compact,
+              onPressed: widget.store.goalUpdating
+                  ? null
+                  : _showEditGoalSheet,
+              icon: const Icon(Icons.edit_outlined, color: muted, size: 20),
+            ),
+          ],
+        ),
+        Expanded(child: _scroll()),
+      ],
+    );
+  }
+
+  Widget _scroll() {
     final goal = widget.store.currentGoal;
     return AppScroll(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          BackButtonLine(
-          label: '返回成长方向',
-          onTap: () => widget.store.goToPage(ExplorePage.growth),
-        ),
-          const SizedBox(height: 22),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              StatusLabel(status: goal.status),
-              IconButton(
-                tooltip: '编辑目标',
-                visualDensity: VisualDensity.compact,
-                onPressed: widget.store.goalUpdating
-                    ? null
-                    : _showEditGoalSheet,
-                icon: const Icon(Icons.edit_outlined, color: muted, size: 20),
-              ),
-            ],
-          ),
+          StatusLabel(status: goal.status),
           const SizedBox(height: 8),
           Row(
             crossAxisAlignment: CrossAxisAlignment.baseline,
@@ -4436,11 +4841,18 @@ class ReportScreen extends StatelessWidget {
   final ExploreStore store;
 
   @override
-  Widget build(BuildContext context) => AppScroll(
+  Widget build(BuildContext context) => Column(
+    children: [
+      const ExploreAppBar(title: '本周成长报告'),
+      Expanded(child: _body()),
+    ],
+  );
+
+  Widget _body() => AppScroll(
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        PageTop(title: '本周成长报告', subtitle: '本周'),
+        const SizedBox(height: 6),
         if (store.reports.isNotEmpty) ...[
           const SizedBox(height: 14),
           DropdownButtonFormField<String>(
@@ -4712,31 +5124,6 @@ class AppScroll extends StatelessWidget {
   );
 }
 
-class PageTop extends StatelessWidget {
-  const PageTop({super.key, required this.title, required this.subtitle});
-  final String title;
-  final String subtitle;
-
-  @override
-  Widget build(BuildContext context) => Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    children: [
-      const SizedBox(height: 13),
-      const Eyebrow('EXPLORE · YOUR GROWTH'),
-      const SizedBox(height: 8),
-      Text(
-        title,
-        style: const TextStyle(
-          fontSize: 26,
-          fontWeight: FontWeight.w700,
-        ),
-      ),
-      const SizedBox(height: 5),
-      Text(subtitle, style: const TextStyle(color: muted, fontSize: 14)),
-    ],
-  );
-}
-
 class SectionTitle extends StatelessWidget {
   const SectionTitle({
     super.key,
@@ -4883,23 +5270,6 @@ class TipCard extends StatelessWidget {
           ),
         ),
       ],
-    ),
-  );
-}
-
-class BackButtonLine extends StatelessWidget {
-  const BackButtonLine({super.key, required this.label, required this.onTap});
-  final String label;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) => TextButton.icon(
-    onPressed: onTap,
-    icon: const Icon(Icons.arrow_back_ios_new_rounded, size: 14),
-    label: Text(label, style: const TextStyle(fontSize: 13)),
-    style: TextButton.styleFrom(
-      foregroundColor: muted,
-      padding: EdgeInsets.zero,
     ),
   );
 }

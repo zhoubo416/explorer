@@ -31,7 +31,9 @@ class ConversationRepository {
         .from('explore_conversations')
         .select()
         .eq('session_id', sessionId)
-        .order('created_at');
+        // 方向必须显式声明：supabase 客户端的 order 默认方向不可依赖，
+        // 倒序数据会让渲染端整体翻转（最新消息跑到列表顶部）
+        .order('created_at', ascending: true);
     return List<Map<String, dynamic>>.from(rows);
   }
 
