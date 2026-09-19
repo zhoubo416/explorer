@@ -45,7 +45,7 @@ function todayLabel() {
     </div>
     <div class="chat-body">
       <div class="chat-date">今天 · {{ todayLabel() }}</div>
-      <div v-if="mode === 'low-mood'" class="companion-banner"><Icon name="spark" :size="15" /><span>你不用现在就解决所有问题，我们先一起理解它。</span></div>
+      <div v-if="mode === 'low-mood'" class="companion-banner"><Icon name="spark" :size="15" /><span>你不用现在就解决所有问题，我们先一起理解它。如果你正面临危险或有伤害自己的念头，请立即联系当地急救电话或心理援助热线，探境无法提供紧急帮助。</span></div>
       <div v-for="message in displayMessages" :key="message.id" class="message-row" :class="message.role">
         <div v-if="message.role === 'assistant'" class="message-avatar"><span /></div>
         <div class="message-bubble"><MarkdownText v-if="message.role === 'assistant' && message.content" :text="message.content" /><span v-else-if="message.role === 'assistant'" class="message-thinking">正在思考…</span><p v-else>{{ message.content }}</p><time>{{ message.time }}</time></div>

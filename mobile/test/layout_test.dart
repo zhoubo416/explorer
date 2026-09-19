@@ -278,6 +278,24 @@ void main() {
     await pumpScreen(tester, ChatScreen(store: store));
   });
 
+  // 陪聊不是紧急求助渠道：陪伴模式必须给出明确兜底，不能只靠模型自觉
+  testWidgets('低情绪模式显示紧急求助提示', (tester) async {
+    final store = seededStore();
+    store.lowMood = true;
+    await pumpScreen(tester, ChatScreen(store: store));
+    expect(
+      find.textContaining('请立即联系当地急救电话或心理援助热线'),
+      findsOneWidget,
+    );
+
+    store.lowMood = false;
+    await pumpScreen(tester, ChatScreen(store: store));
+    expect(
+      find.textContaining('请立即联系当地急救电话或心理援助热线'),
+      findsNothing,
+    );
+  });
+
   testWidgets('长标题不溢出', (tester) async {
     final store = seededStore();
     store.goals.first.title = '成为一个能够持续创造价值的独立开发者并影响更多人';
@@ -496,8 +514,9 @@ void main() {
       find.textContaining('我们收集哪些信息', findRichText: true),
       findsOneWidget,
     );
+    // 第三方处理与存储地域必须在政策里写清楚
     expect(
-      find.textContaining('美国东部', findRichText: true),
+      find.textContaining('阿里云百炼的数据处理在中国大陆', findRichText: true),
       findsOneWidget,
     );
   });

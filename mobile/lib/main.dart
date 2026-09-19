@@ -3430,18 +3430,29 @@ class _ChatScreenState extends State<ChatScreen> {
                           color: violetBg,
                           borderRadius: BorderRadius.circular(10),
                         ),
-                        child: const Row(
+                        child: const Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Icon(Icons.auto_awesome_rounded, size: 15, color: purple),
-                            SizedBox(width: 7),
-                            Expanded(
-                              child: Text(
-                                '你不用现在就解决所有问题，我们先一起理解它。',
-                                style: TextStyle(
-                                  color: muted,
-                                  fontSize: 13,
+                            Row(
+                              children: [
+                                Icon(Icons.auto_awesome_rounded, size: 15, color: purple),
+                                SizedBox(width: 7),
+                                Expanded(
+                                  child: Text(
+                                    '你不用现在就解决所有问题，我们先一起理解它。',
+                                    style: TextStyle(
+                                      color: muted,
+                                      fontSize: 13,
+                                    ),
+                                  ),
                                 ),
-                              ),
+                              ],
+                            ),
+                            SizedBox(height: 7),
+                            // 陪聊不是紧急求助渠道：低情绪场景下必须给一条明确的兜底
+                            Text(
+                              '如果你正面临危险或有伤害自己的念头，请立即联系当地急救电话或心理援助热线，探境无法提供紧急帮助。',
+                              style: TextStyle(color: muted2, fontSize: 11.5, height: 1.5),
                             ),
                           ],
                         ),
