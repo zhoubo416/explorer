@@ -132,12 +132,32 @@ class ConversationSummary {
     required this.date,
     required this.preview,
     required this.messages,
+    this.updatedAt,
   });
   final String? id;
   final String title;
   final String date;
   final String preview;
   final List<ChatMessage> messages;
+  /// 会话行的原始时间戳（ISO）。date 只是给人看的中文标签，「最近一次会话是不是
+  /// 今天」这类判断必须用原始值，本地缓存回来的历史列表才能自己判出隔天
+  /// （见 refreshActiveConversation）
+  final String? updatedAt;
+}
+
+/// 把拉到的会话并进历史列表：拉到的为底，保留本地已有、这次没拉到的会话
+/// （请求发出后用户才新建的会话不会出现在响应里），按 id 去重、拉到的版本优先。
+/// 只处理「数据」，不碰会话现场（activeSessionId / messages）。
+List<ConversationSummary> mergeConversationSummaries(
+  List<ConversationSummary> local,
+  List<ConversationSummary> incoming,
+) {
+  final incomingIds = {for (final conversation in incoming) conversation.id};
+  return [
+    for (final conversation in local)
+      if (!incomingIds.contains(conversation.id)) conversation,
+    ...incoming,
+  ];
 }
 
 class ExploreStore extends ChangeNotifier {
@@ -149,7 +169,6 @@ class ExploreStore extends ChangeNotifier {
   final List<ConversationSummary> conversations = [];
   String selectedGoalId = '';
   int selectedNav = 0;
-  int activeConversationIndex = 0;
   ExplorePage page = ExplorePage.home;
   /// 目标共创页的来源页，返回时回到进入前所在页面
   ExplorePage goalCreateOrigin = ExplorePage.growth;
@@ -207,6 +226,16 @@ class ExploreStore extends ChangeNotifier {
   }
 
   List<ChatMessage> get visibleMessages => messages;
+
+  /// 当前会话在历史列表里的位置；只由 activeSessionId 推导，找不到时为 -1。
+  /// 是派生值而不是字段：会话现场只有 activeSessionId 一个真相来源，历史列表
+  /// 被刷新/合并后不会再出现「索引指向另一条会话」的错位
+  /// （见 _refreshActiveConversationPreview）。
+  int get activeConversationIndex {
+    final id = activeSessionId;
+    if (id == null) return -1;
+    return conversations.indexWhere((c) => c.id == id);
+  }
 
   bool get remoteEnabled => SupabaseService.client != null;
 
@@ -289,25 +318,18 @@ class ExploreStore extends ChangeNotifier {
           ..clear()
           ..addAll(remoteMemories.map(_memoryFromRow));
       }
+      // 只刷历史列表这份「数据」：当前会话是谁、消息是什么由进入对话页和用户操作
+      // 决定（见 refreshActiveConversation）。在这里写现场会盖掉用户在加载期间新建
+      // 的会话、已经发出的消息，以及「新增对话」的空态；换账号、登出需要清现场的话
+      // 由 clearUserData 负责，那是加载开头就做过的事
       if (remotePairs != null) {
-        final remoteConversations = [
-          for (final pair in remotePairs) _conversationFromPair(pair),
-        ];
-        if (remoteConversations.isNotEmpty) {
-          conversations
-            ..clear()
-            ..addAll(remoteConversations);
-          activeConversationIndex = 0;
-          activeSessionId = conversations.first.id;
-          messages
-            ..clear()
-            ..addAll(conversations.first.messages);
-        } else {
-          conversations.clear();
-          messages.clear();
-          activeConversationIndex = 0;
-          activeSessionId = null;
-        }
+        conversations
+          ..clear()
+          ..addAll(
+            mergeConversationSummaries(conversations, [
+              for (final pair in remotePairs) _conversationFromPair(pair),
+            ]),
+          );
       }
       if (remoteObservations != null && remoteObservations.isNotEmpty) {
         observations
@@ -367,12 +389,19 @@ class ExploreStore extends ChangeNotifier {
       if (goals.isNotEmpty || memories.isNotEmpty) {
         runProactiveCheck();
       }
-      goToPage(ExplorePage.home);
+      // 这里不强制 goToPage(ExplorePage.home)：加载开头的 clearUserData() 已经把
+      // 页面归位到首页，本行还能改变状态的情况只剩「用户在加载期间自己切了页」
+      // （冷启动时尤其容易发生，首次登录要等好几秒），那正是最不该拽他回首页的时候
     } catch (error) {
       remoteError = error.toString();
     } finally {
       remoteLoading = false;
       notifyListeners();
+      // 加载期间用户已经自己进了对话页：上面那次刷新会被 remoteLoading 挡掉
+      // （含「最近会话隔天就开新会话」的判定），等加载结束在这里补一次
+      if (page == ExplorePage.chat) {
+        unawaited(refreshActiveConversation(toLatest: true));
+      }
     }
   }
 
@@ -438,14 +467,10 @@ class ExploreStore extends ChangeNotifier {
         _conversationFromPair(pair),
     ];
     if (cachedConversations.isNotEmpty) {
+      // 和远端那条路一样只写数据，会话现场留给进入对话页决定
       conversations
         ..clear()
-        ..addAll(cachedConversations);
-      activeConversationIndex = 0;
-      activeSessionId = conversations.first.id;
-      messages
-        ..clear()
-        ..addAll(conversations.first.messages);
+        ..addAll(mergeConversationSummaries(conversations, cachedConversations));
     }
     final cachedObservations = _rowsFrom(cache['observations']);
     if (cachedObservations.isNotEmpty) {
@@ -497,6 +522,7 @@ class ExploreStore extends ChangeNotifier {
               ? '还没有消息'
               : mappedMessages.last.content),
       messages: mappedMessages,
+      updatedAt: (session['updated_at'] ?? session['created_at'])?.toString(),
     );
   }
 
@@ -1095,7 +1121,6 @@ class ExploreStore extends ChangeNotifier {
     messages
       ..clear()
       ..addAll(conversations[index].messages);
-    activeConversationIndex = index;
     activeSessionId = conversations[index].id;
     // 用户主动翻回历史会话：切换目标带来的新对话空态就此解除
     _pendingNewChat = false;
@@ -1116,20 +1141,41 @@ class ExploreStore extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 进入对话页时刷新当前会话的消息；[toLatest] 或没有活跃会话时定位到最近一次会话。
-  /// 发送中或首次全量加载进行中都不刷新，避免和流式写入、loadRemoteData 竞争。
+  /// 进入对话页时定位并刷新当前会话，分两段：先用内存里的历史列表同步画出来
+  /// （零等待，离线也有内容可看），再用网络结果校准。
+  /// [toLatest] 表示这次进入要定位到最近一次会话（底部导航、首页快捷入口），
+  /// 否则沿用当前会话（历史面板选回某条）。
+  /// 会话现场（activeSessionId / messages / 空态）只有这里和用户操作会写，
+  /// 加载路径只维护 conversations 这份数据。
   Future<void> refreshActiveConversation({bool toLatest = false}) async {
+    // 流式写入中：现场归发送流程，这里一个字都不能动
+    if (chatSending) return;
+    // 「新增对话」空态：不自动恢复最近会话，保持空态等第一条消息
+    if (_pendingNewChat && activeSessionId == null) return;
+
+    // 本地先行：历史列表（缓存或上次加载留下的）已经在内存里，先画出来避免空窗
+    var startedNewChatLocally = false;
+    if (toLatest && conversations.isNotEmpty) {
+      final latest = conversations.first;
+      if (latest.updatedAt != null && !_isSameLocalDay(latest.updatedAt)) {
+        // 最近一次会话是更早的某天：立刻开新会话，别让旧话题先闪一下。
+        // 网络结果可能推翻这个判断（比如今天在别的设备聊过），见下面的撤销
+        startNewConversation();
+        startedNewChatLocally = true;
+      } else {
+        // 时间未知（更早版本落的缓存）时按同一天处理，不擅自清掉会话
+        _activateConversation(latest);
+      }
+    }
+
     final client = SupabaseService.client;
-    if (client == null ||
-        client.auth.currentUser == null ||
-        chatSending ||
-        remoteLoading) {
+    // 本地已经画完了，这里只决定要不要再拉网络。首次全量加载进行中时由
+    // loadRemoteData 的收尾补一次刷新，不和它抢
+    if (client == null || client.auth.currentUser == null || remoteLoading) {
       return;
     }
     final repository = ConversationRepository(client);
     try {
-      // 「新增对话」空态：不自动恢复最近会话，保持空态等第一条消息
-      if (_pendingNewChat && activeSessionId == null) return;
       var sessionId = activeSessionId;
       // 重置到最近一次（导航栏、首页快捷入口），或没有活跃会话（「新增对话」后的空态）
       Map<String, dynamic>? latestSession;
@@ -1163,9 +1209,11 @@ class ExploreStore extends ChangeNotifier {
         ..clear()
         ..addAll(fresh);
       activeSessionId = sessionId;
+      // 网络说最近一次会话就是今天：上面本地那次「隔天」判断作废，撤掉它开的空态。
+      // 只撤本次本地判断，不碰切换目标等其它来源留下的 _pendingNewChat
+      if (startedNewChatLocally) _pendingNewChat = false;
       final summaryIndex = conversations.indexWhere((c) => c.id == sessionId);
       if (summaryIndex >= 0) {
-        activeConversationIndex = summaryIndex;
         // 历史列表里同一条会话的消息与预览也换成刚拉到的；
         // 定位到最近一次会话时顺带把时间也换成会话行的最新值
         final conversation = conversations[summaryIndex];
@@ -1182,12 +1230,27 @@ class ExploreStore extends ChangeNotifier {
                 ),
           preview: fresh.isEmpty ? conversation.preview : fresh.last.content,
           messages: conversation.messages,
+          updatedAt: latestSession == null
+              ? conversation.updatedAt
+              : (latestSession['updated_at'] ?? latestSession['created_at'])
+                  ?.toString(),
         );
       }
       notifyListeners();
     } catch (_) {
       // 拉取失败保持现状，不打断用户
     }
+  }
+
+  /// 把会话现场切到某条历史会话（只写现场，不碰历史列表）
+  void _activateConversation(ConversationSummary conversation) {
+    final id = conversation.id;
+    if (id == null) return;
+    activeSessionId = id;
+    messages
+      ..clear()
+      ..addAll(conversation.messages);
+    notifyListeners();
   }
 
   void showGoalDetail() {
@@ -1307,7 +1370,6 @@ class ExploreStore extends ChangeNotifier {
     lowMood = false;
     selectedGoalId = '';
     activeSessionId = null;
-    activeConversationIndex = 0;
     remoteError = null;
     remoteLoading = false;
     reportLoading = false;
@@ -1486,6 +1548,9 @@ class ExploreStore extends ChangeNotifier {
       date: '刚刚',
       preview: messages.isEmpty ? conversation.preview : messages.last.content,
       messages: conversation.messages,
+      // 刚聊过：时间戳跟着更新，否则隔天再进对话页会拿旧时间判成「隔天」，
+      // 把今天还在用的会话误判成该开新会话
+      updatedAt: DateTime.now().toIso8601String(),
     );
     notifyListeners();
   }
@@ -1528,9 +1593,9 @@ class ExploreStore extends ChangeNotifier {
             date: '刚刚',
             preview: content,
             messages: List<ChatMessage>.from(messages),
+            updatedAt: DateTime.now().toIso8601String(),
           ),
         );
-        activeConversationIndex = 0;
       }
       await repository.addMessage(
         sessionId: activeSessionId!,
