@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -24,7 +25,7 @@ const mintBg = Color(0xFFE5F8F1);
 const coralBg = Color(0xFFFFF0EC);
 const amberBg = Color(0xFFFFF4D9);
 
-/// 新会话的 AI 开场白：空会话先展示，发出第一条消息时随会话落库（见 _persistMessage）
+/// 新会话的 AI 开场白：仅空会话时展示，发出第一条消息即让位消失，不随会话落库
 const chatGreeting =
     '你好，我是探境。最近过得怎么样？开心的、烦心的，或者还没想明白的事，都可以随时说给我听。';
 
@@ -43,6 +44,19 @@ Future<void> main() async {
 String greetingFor(DateTime now) {
   final hour = now.hour;
   return hour < 11 ? '早上好' : hour < 18 ? '下午好' : '晚上好';
+}
+
+// 对话页顶部日期条的文案：当天的会话带「今天 ·」前缀，昨天的带「昨天 ·」，
+// 更早的只写日期。跟 greetingFor 一样做成纯函数，测试传入固定时间断言。
+String chatDateLabelFor(DateTime date, DateTime now) {
+  String label(DateTime d) => '${d.month} 月 ${d.day} 日';
+  bool sameDay(DateTime a, DateTime b) =>
+      a.year == b.year && a.month == b.month && a.day == b.day;
+  if (sameDay(date, now)) return '今天 · ${label(date)}';
+  if (sameDay(date, now.subtract(const Duration(days: 1)))) {
+    return '昨天 · ${label(date)}';
+  }
+  return label(date);
 }
 
 enum ExplorePage {
@@ -235,6 +249,15 @@ class ExploreStore extends ChangeNotifier {
     final id = activeSessionId;
     if (id == null) return -1;
     return conversations.indexWhere((c) => c.id == id);
+  }
+
+  /// 对话页顶部日期条：按当前会话的活跃时间显示；没有活跃会话、或缓存里
+  /// 缺原始时间戳（更早版本落的）时按今天显示
+  String get chatDateLabel {
+    final index = activeConversationIndex;
+    final updatedAt = index >= 0 ? conversations[index].updatedAt : null;
+    final date = updatedAt != null ? DateTime.tryParse(updatedAt) : null;
+    return chatDateLabelFor(date ?? DateTime.now(), DateTime.now());
   }
 
   bool get remoteEnabled => SupabaseService.client != null;
@@ -942,7 +965,7 @@ class ExploreStore extends ChangeNotifier {
           );
         },
         onGoal: (goal) async {
-          // 没收到任何内容时撤掉占位，不留一条「正在思考…」
+          // 没收到任何内容时撤掉占位，不留一条思考动画气泡
           if (reply.isEmpty && goal == null) {
             goalCreationMessages.removeAt(placeholderIndex);
             remoteError = 'AI 暂时没有回复，请稍后重试。';
@@ -1439,6 +1462,12 @@ class ExploreStore extends ChangeNotifier {
       final isLowMood = lowMood;
       final target = messages;
       target.add(ChatMessage(isUser: true, content: content, time: timeNow()));
+      // 占位消息：随流式增量不断替换，避免等待期间界面毫无反馈；
+      // 紧跟用户消息就上，不等落库，思考动画在点发送的当下就出现
+      var reply = '';
+      final replyTime = timeNow();
+      target.add(ChatMessage(isUser: false, content: '', time: replyTime));
+      final placeholderIndex = target.length - 1;
       notifyListeners();
       await _persistMessage(
         role: 'user',
@@ -1446,16 +1475,14 @@ class ExploreStore extends ChangeNotifier {
         mode: isLowMood ? 'low_mood' : 'normal',
       );
       if (!remoteEnabled || activeSessionId == null) {
+        // 会话没建起来：撤掉思考占位，只留用户消息和错误提示
+        if (placeholderIndex < target.length) {
+          target.removeAt(placeholderIndex);
+        }
         remoteError = 'Supabase 未配置或未登录，无法获取 AI 回复。';
         notifyListeners();
         return;
       }
-      // 占位消息：随流式增量不断替换，避免等待期间界面毫无反馈
-      var reply = '';
-      final replyTime = timeNow();
-      target.add(ChatMessage(isUser: false, content: '', time: replyTime));
-      final placeholderIndex = target.length - 1;
-      notifyListeners();
       var lastPaintedAt = DateTime.now();
       try {
         await const AiService().streamReply(
@@ -1490,6 +1517,8 @@ class ExploreStore extends ChangeNotifier {
       // 切换目标时若这条消息的流式回复还在途，等结束后再清空会话，开启新对话
       if (_pendingNewChat) startNewConversation();
       chatSending = false;
+      // 一轮结束（成功或失败）：发送中压住的时间行这时才显示，需要再刷一次 UI
+      notifyListeners();
     }
   }
 
@@ -1572,19 +1601,6 @@ class ExploreStore extends ChangeNotifier {
       // 消息已归属具体会话：切换目标带来的新对话空态就此解除
       _pendingNewChat = false;
       if (shouldCreateSummary) {
-        // 新会话先落一条 AI 欢迎语（与目标共创的开场一致），失败不阻塞消息发送；
-        // 本地同步补上，避免发送后欢迎语凭空消失
-        try {
-          await repository.addMessage(
-            sessionId: activeSessionId!,
-            role: 'assistant',
-            content: chatGreeting,
-          );
-          messages.insert(
-            0,
-            ChatMessage(isUser: false, content: chatGreeting, time: ''),
-          );
-        } catch (_) {}
         conversations.insert(
           0,
           ConversationSummary(
@@ -1592,7 +1608,10 @@ class ExploreStore extends ChangeNotifier {
             title: '新的对话',
             date: '刚刚',
             preview: content,
-            messages: List<ChatMessage>.from(messages),
+            // 快照剔除仍在流式中的空占位，历史列表里不留思考动画
+            messages: List<ChatMessage>.from(
+              messages.where((m) => m.content.isNotEmpty),
+            ),
             updatedAt: DateTime.now().toIso8601String(),
           ),
         );
@@ -3473,6 +3492,8 @@ class ChatScreen extends StatefulWidget {
 class _ChatScreenState extends State<ChatScreen> {
   final controller = TextEditingController();
   final inputFocus = FocusNode();
+  final _scrollController = ScrollController();
+  int _lastMessageCount = 0;
 
   @override
   void initState() {
@@ -3480,20 +3501,69 @@ class _ChatScreenState extends State<ChatScreen> {
     // 开始输入（键盘弹起或输入了文字）时收起建议区，避免它挤压、遮挡消息
     inputFocus.addListener(_refreshTypingState);
     controller.addListener(_refreshTypingState);
+    _lastMessageCount = widget.store.messages.length;
+    widget.store.addListener(_onStoreChanged);
+    // 进入页面时定位到最新消息，不用手动滚过历史消息
+    _jumpToBottom();
   }
 
   @override
   void dispose() {
+    widget.store.removeListener(_onStoreChanged);
     inputFocus.removeListener(_refreshTypingState);
     controller.removeListener(_refreshTypingState);
     inputFocus.dispose();
     controller.dispose();
+    _scrollController.dispose();
     super.dispose();
   }
 
   void _refreshTypingState() {
     if (!mounted) return;
+    // 键盘弹起会压缩可视区：本来就贴在最新消息附近时，跟到底部
+    if (inputFocus.hasFocus && _nearBottom()) _jumpToBottom();
     setState(() {});
+  }
+
+  void _onStoreChanged() {
+    if (!mounted) return;
+    final count = widget.store.messages.length;
+    final countChanged = count != _lastMessageCount;
+    _lastMessageCount = count;
+    // 条数变化（发送、切会话、加载校准）：直接停在最新一条；
+    // 条数没变（流式增量撑高气泡）：只在本来就贴底时跟着滚，不打扰翻看旧消息
+    if (countChanged || _nearBottom()) _jumpToBottom();
+  }
+
+  bool _nearBottom() {
+    if (!_scrollController.hasClients) return true;
+    final position = _scrollController.position;
+    return position.maxScrollExtent - position.pixels < 120;
+  }
+
+  void _jumpToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scrollController.hasClients) return;
+      final position = _scrollController.position;
+      final target = position.maxScrollExtent;
+      if (position.pixels == target) return;
+      position.jumpTo(target);
+      _verifyBottom(target);
+    });
+  }
+
+  // 首帧的 maxScrollExtent 是估算值（列表条目边建边估），跳完之后还会变大；
+  // 只要位置还停在我们跳到的地方就再补一跳，用户手动滚开则不再追。
+  void _verifyBottom(double jumpedTo) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scrollController.hasClients) return;
+      final position = _scrollController.position;
+      if (position.pixels != jumpedTo) return;
+      final target = position.maxScrollExtent;
+      if (target == jumpedTo) return;
+      position.jumpTo(target);
+      _verifyBottom(target);
+    });
   }
 
   bool get typing => inputFocus.hasFocus || controller.text.isNotEmpty;
@@ -3511,6 +3581,10 @@ class _ChatScreenState extends State<ChatScreen> {
       builder: (_) => ConversationHistorySheet(store: widget.store),
     );
   }
+
+  // 发送中的一轮（末尾的用户消息 + 流式占位）：时间行等整轮返回再出现
+  Set<ChatMessage> get _inFlight =>
+      sendingTail(widget.store.chatSending, widget.store.messages);
 
   @override
   Widget build(BuildContext context) => Column(
@@ -3555,7 +3629,7 @@ class _ChatScreenState extends State<ChatScreen> {
           child: Column(
             children: [
               // 空会话：AI 欢迎语固定在消息区顶部（与目标共创的开场一致）；
-              // 发出第一条消息时由 _persistMessage 落库，此后保留在会话历史里
+              // 发出第一条消息即让位消失，不进消息流、不落库
               if (widget.store.messages.isEmpty)
                 Padding(
                   padding: const EdgeInsets.fromLTRB(20, 11, 20, 0),
@@ -3569,21 +3643,21 @@ class _ChatScreenState extends State<ChatScreen> {
                   ),
                 ),
               Expanded(
-                // reverse: true 让列表默认停在最新消息处（视觉底部），新消息和流式回复也自动贴底
+                // 消息从上往下排：内容不满一屏时贴顶；满了之后由 _onStoreChanged
+                // 把滚动位置带到最新消息处
                 child: ListView(
-                  reverse: true,
+                  controller: _scrollController,
                   keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
                   padding: const EdgeInsets.fromLTRB(20, 11, 20, 11),
                   children: [
-                    if (!typing) ...[
-                      _ChatSuggestions(store: widget.store, controller: controller),
-                      const SizedBox(height: 12),
-                    ],
-                    for (final message in widget.store.visibleMessages.reversed)
-                      // key 让消息在建议区收起/展开（列表头部增删）时保持元素对位，
-                      // 否则 MarkdownBody 会按索引错位复用，销毁时可能触发断言
-                      ChatBubble(key: ValueKey(message), message: message),
-                    const SizedBox(height: 20),
+                    // 日期条取当前会话的真实活跃时间，不再写死（见 chatDateLabel）
+                    if (widget.store.messages.isNotEmpty)
+                      Center(
+                        child: Text(
+                          widget.store.chatDateLabel,
+                          style: const TextStyle(color: muted2, fontSize: 13),
+                        ),
+                      ),
                     if (widget.store.lowMood)
                       Container(
                         margin: const EdgeInsets.symmetric(vertical: 18),
@@ -3619,15 +3693,28 @@ class _ChatScreenState extends State<ChatScreen> {
                           ],
                         ),
                       ),
-                    Center(
-                      child: Text(
-                        '今天 · 8 月 9 日',
-                        style: const TextStyle(color: muted2, fontSize: 13),
+                    if (widget.store.messages.isNotEmpty) const SizedBox(height: 20),
+                    for (final message in widget.store.visibleMessages)
+                      // key 让流式替换出的新消息保持元素对位，否则 MarkdownBody
+                      // 会按索引错位复用，销毁时可能触发断言
+                      ChatBubble(
+                        key: ValueKey(message),
+                        message: message,
+                        sending: _inFlight.contains(message),
                       ),
-                    ),
                   ],
                 ),
               ),
+              // 建议区固定贴在输入框上方（空会话或翻看消息时都在）；
+              // 聚焦输入或输入了文字时收起，避免挤压、遮挡消息
+              if (!typing)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 0, 20, 11),
+                  child: _ChatSuggestions(
+                    store: widget.store,
+                    controller: controller,
+                  ),
+                ),
             ],
           ),
         ),
@@ -3867,9 +3954,26 @@ class _ChatSuggestions extends StatelessWidget {
   }
 }
 
+/// 发送中的一轮消息：末尾的流式占位，以及它前面的那条用户消息。
+/// ChatBubble 用它压住时间行，等整轮消息返回后再显示。
+Set<ChatMessage> sendingTail(bool sending, List<ChatMessage> messages) {
+  if (!sending || messages.isEmpty) return const {};
+  final last = messages.last;
+  final result = <ChatMessage>{last};
+  if (!last.isUser &&
+      messages.length > 1 &&
+      messages[messages.length - 2].isUser) {
+    result.add(messages[messages.length - 2]);
+  }
+  return result;
+}
+
 class ChatBubble extends StatelessWidget {
-  const ChatBubble({super.key, required this.message});
+  const ChatBubble({super.key, required this.message, this.sending = false});
   final ChatMessage message;
+
+  /// 发送中的一轮（见 sendingTail）：时间行等整轮消息返回后再出现
+  final bool sending;
 
   // 助手回复是 Markdown（与 Web 端 MarkdownText 的渲染对齐），
   // 样式尽量贴近气泡里普通文本的观感
@@ -3912,43 +4016,59 @@ class ChatBubble extends StatelessWidget {
     alignment: message.isUser ? Alignment.centerRight : Alignment.centerLeft,
     child: Padding(
       padding: const EdgeInsets.only(bottom: 16),
-      child: Row(
+      child: Column(
         mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
+        // 时间跟着气泡所在侧：AI 的在左下，用户的在右下
+        crossAxisAlignment:
+            message.isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
         children: [
-          if (!message.isUser) const AgentAvatar(small: true),
-          if (!message.isUser) const SizedBox(width: 8),
-          Flexible(
-            child: Container(
-              constraints: const BoxConstraints(maxWidth: 285),
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
-              decoration: BoxDecoration(
-                color: message.isUser
-                    ? const Color(0xFFE5E2FF)
-                    : const Color(0xFFF5F5FB),
-                borderRadius: BorderRadius.only(
-                  topLeft: Radius.circular(15),
-                  topRight: const Radius.circular(15),
-                  bottomLeft: Radius.circular(message.isUser ? 15 : 5),
-                  bottomRight: Radius.circular(message.isUser ? 5 : 15),
-                ),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Align(alignment: Alignment.centerLeft, child: _content()),
-                  const SizedBox(height: 5),
-                  Text(
-                    message.time,
-                    style: const TextStyle(
-                      color: muted2,
-                      fontSize: 11,
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (!message.isUser) const AgentAvatar(small: true),
+              if (!message.isUser) const SizedBox(width: 8),
+              Flexible(
+                child: Container(
+                  constraints: const BoxConstraints(maxWidth: 285),
+                  // 思考占位竖直方向留厚一点，别成一个细条
+                  padding: EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: !message.isUser && message.content.isEmpty ? 15 : 11,
+                  ),
+                  decoration: BoxDecoration(
+                    color: message.isUser
+                        ? const Color(0xFFE5E2FF)
+                        : const Color(0xFFF5F5FB),
+                    borderRadius: BorderRadius.only(
+                      topLeft: Radius.circular(15),
+                      topRight: const Radius.circular(15),
+                      bottomLeft: Radius.circular(message.isUser ? 15 : 5),
+                      bottomRight: Radius.circular(message.isUser ? 5 : 15),
                     ),
                   ),
-                ],
+                  // 思考占位时收紧宽度：气泡只包住圆点，不像正文那样占满整行
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    widthFactor:
+                        !message.isUser && message.content.isEmpty ? 1.0 : null,
+                    child: _content(),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          // 时间显示在气泡下方、与气泡同侧；思考占位、时间留空的消息（空态
+          // 欢迎语）和发送中的一轮不显示，等整轮返回后再出现
+          if (message.time.isNotEmpty && !sending)
+            Padding(
+              // AI 消息的时间对齐到头像右侧的气泡起点
+              padding: EdgeInsets.only(top: 3, left: message.isUser ? 0 : 37),
+              child: Text(
+                message.time,
+                style: const TextStyle(color: muted2, fontSize: 11),
               ),
             ),
-          ),
         ],
       ),
     ),
@@ -3965,15 +4085,61 @@ class ChatBubble extends StatelessWidget {
         ),
       );
     }
-    // 流式回复开始时内容为空，先给一个占位提示
+    // 流式回复开始时内容为空：三个圆点的思考动画代替文字提示
     if (message.content.isEmpty) {
-      return const Text(
-        '正在思考…',
-        style: TextStyle(color: Color(0xFF4A4A63), fontSize: 14, height: 1.65),
-      );
+      return const ThinkingDots();
     }
     return MarkdownBody(data: message.content, styleSheet: _assistantStyle);
   }
+}
+
+/// AI 思考中的三点动画：占位气泡里圆点随相位轮流明暗，代替「正在思考…」文字
+class ThinkingDots extends StatefulWidget {
+  const ThinkingDots({super.key});
+
+  @override
+  State<ThinkingDots> createState() => _ThinkingDotsState();
+}
+
+class _ThinkingDotsState extends State<ThinkingDots>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1100),
+  )..repeat();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  // 余弦让每个圆点平滑地「暗—亮—暗」循环，相位逐个后移形成波浪，不用拼 Interval
+  double _alpha(int index) {
+    final phase = (_controller.value - index * 0.22) % 1;
+    return 0.25 + 0.75 * (0.5 - 0.5 * cos(2 * pi * phase));
+  }
+
+  @override
+  Widget build(BuildContext context) => AnimatedBuilder(
+        animation: _controller,
+        builder: (context, _) => Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (var i = 0; i < 3; i++) ...[
+              if (i > 0) const SizedBox(width: 6),
+              Container(
+                width: 9,
+                height: 9,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: const Color(0xFF4A4A63).withValues(alpha: _alpha(i)),
+                ),
+              ),
+            ],
+          ],
+        ),
+      );
 }
 
 class AgentAvatar extends StatelessWidget {
@@ -4064,28 +4230,35 @@ class _GoalCreateScreenState extends State<GoalCreateScreen> {
     ],
   );
 
-  Widget _body() => AppScroll(
-    controller: _scrollController,
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        for (final message in widget.store.goalCreationMessages)
-          ChatBubble(message: message),
-        if (widget.store.goalChatLoading)
-          const Padding(
-            padding: EdgeInsets.symmetric(vertical: 12),
-            child: Center(
-              child: SizedBox(
-                width: 18,
-                height: 18,
-                child: CircularProgressIndicator(strokeWidth: 2),
+  Widget _body() {
+    // 发送中的一轮（末尾的用户消息 + 流式占位）：时间行等整轮返回再出现
+    final inFlight = sendingTail(
+      widget.store.goalChatLoading,
+      widget.store.goalCreationMessages,
+    );
+    return AppScroll(
+      controller: _scrollController,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          for (final message in widget.store.goalCreationMessages)
+            ChatBubble(message: message, sending: inFlight.contains(message)),
+          if (widget.store.goalChatLoading)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 12),
+              child: Center(
+                child: SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
               ),
             ),
-          ),
-        if (widget.store.goalDraft != null) _GoalPreview(store: widget.store),
-      ],
-    ),
-  );
+          if (widget.store.goalDraft != null) _GoalPreview(store: widget.store),
+        ],
+      ),
+    );
+  }
 
   // 底部导航在本页返回 null，body 因此保留底部安全区（见 _bottomNav），
   // 输入框与其它页面的输入框一样，只需在安全区之上留一段常规留白

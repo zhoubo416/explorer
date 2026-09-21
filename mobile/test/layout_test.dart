@@ -446,7 +446,8 @@ void main() {
         ),
       ),
     );
-    await tester.pump();
+    // 正向列表进入时先跳到估算底部，随后一帧校准到真实底部（见 _verifyBottom）
+    await tester.pumpAndSettle();
 
     // 最新消息在可视区内，且比更旧的已构建消息更靠屏幕下方
     expect(find.text('消息序号 28'), findsOneWidget);

@@ -182,4 +182,26 @@ void main() {
       expect(mergeConversationSummaries(local, const []), local);
     });
   });
+
+  group('对话页顶部日期条', () {
+    final now = DateTime(2026, 9, 21, 15, 0);
+
+    test('当天的会话带「今天 ·」前缀', () {
+      expect(
+        chatDateLabelFor(DateTime(2026, 9, 21, 9, 30), now),
+        '今天 · 9 月 21 日',
+      );
+    });
+
+    test('昨天的会话带「昨天 ·」前缀', () {
+      expect(
+        chatDateLabelFor(DateTime(2026, 9, 20, 23, 59), now),
+        '昨天 · 9 月 20 日',
+      );
+    });
+
+    test('更早的会话只写日期', () {
+      expect(chatDateLabelFor(DateTime(2026, 8, 9, 10, 0), now), '8 月 9 日');
+    });
+  });
 }
