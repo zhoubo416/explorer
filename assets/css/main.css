@@ -71,4 +71,3 @@ button { border: 0; cursor: pointer; }
 .markdown-body blockquote { margin: 8px 0; padding: 2px 0 2px 10px; color: #5c5c78; border-left: 2px solid #d5d2f2; }
 .markdown-body a { color: #5c55a2; text-decoration: underline; }
 .markdown-body hr { margin: 10px 0; border: 0; border-top: 1px solid #e5e4f1; }
-.message-thinking { color: var(--muted-2); font-size: 14px; }

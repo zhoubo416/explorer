@@ -172,15 +172,11 @@ function intValue(value: unknown): number {
   return Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 0
 }
 
-// 新会话的 AI 开场白：空会话先展示，发出第一条消息时随会话落库（见 sendMessage）
+// 新会话的 AI 开场白：仅空会话时展示，发出第一条消息即让位消失，不落库、不进历史
 export const CHAT_GREETING = '你好，我是探境。最近过得怎么样？开心的、烦心的，或者还没想明白的事，都可以随时说给我听。'
 
 // 目标共创的开场白：原「为什么从对话开始」侧栏文案并入这里
 export const GOAL_CREATION_GREETING = '你好，我是探境。目标不是一开始就完美的答案，而是你愿意先靠近的一条路——不用先想清楚，我们边走边发现。最近有没有一件事，你一直想做，但还没真正开始？'
-
-function chatGreetingMessage(): Message {
-  return { id: 'chat-greeting', role: 'assistant', content: CHAT_GREETING, time: '' }
-}
 
 const emptyGoal = (): Goal => ({
   id: '',
@@ -970,15 +966,7 @@ export function useExplore() {
         if (se) throw se
         activeSessionId.value = session.id
         conversations.value = [{ id: session.id, title: '新的对话', preview: text }, ...conversations.value]
-        // 新会话先落一条 AI 欢迎语（与目标共创的开场一致），失败不阻塞发送；
-        // 本地同步补上，避免发送后欢迎语凭空消失
-        const { error: ge } = await supabase.from('explore_conversations').insert({
-          session_id: activeSessionId.value,
-          user_id: user.value.id,
-          role: 'assistant',
-          content: CHAT_GREETING,
-        })
-        if (!ge) messages.value = [chatGreetingMessage(), ...messages.value]
+        // 欢迎语只是空态占位，不落库：会话直接从用户消息开始
       }
 
       await supabase.from('explore_conversations').insert({

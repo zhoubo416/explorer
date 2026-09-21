@@ -9,8 +9,7 @@ const draft = shallowRef('')
 const showHistory = shallowRef(false)
 const inputRef = useTemplateRef<HTMLInputElement>('chatInput')
 
-// 空会话显示一条 AI 欢迎语（与目标共创的开场一致）；
-// 发出第一条消息时由 sendMessage 落库，此后保留在会话历史里
+// 空会话显示一条 AI 欢迎语占位；发出第一条消息即让位消失，不落库、不进历史
 const displayMessages = computed(() =>
   props.messages.length
     ? props.messages
@@ -48,7 +47,7 @@ function todayLabel() {
       <div v-if="mode === 'low-mood'" class="companion-banner"><Icon name="spark" :size="15" /><span>你不用现在就解决所有问题，我们先一起理解它。如果你正面临危险或有伤害自己的念头，请立即联系当地急救电话或心理援助热线，探境无法提供紧急帮助。</span></div>
       <div v-for="message in displayMessages" :key="message.id" class="message-row" :class="message.role">
         <div v-if="message.role === 'assistant'" class="message-avatar"><span /></div>
-        <div class="message-bubble"><MarkdownText v-if="message.role === 'assistant' && message.content" :text="message.content" /><span v-else-if="message.role === 'assistant'" class="message-thinking">正在思考…</span><p v-else>{{ message.content }}</p><time>{{ message.time }}</time></div>
+        <div class="message-bubble"><MarkdownText v-if="message.role === 'assistant' && message.content" :text="message.content" /><span v-else-if="message.role === 'assistant'" class="typing-bubble" aria-label="正在思考"><i class="typing-dot" /><i class="typing-dot" /><i class="typing-dot" /></span><p v-else>{{ message.content }}</p><time v-if="message.content && message.time">{{ message.time }}</time></div>
       </div>
       <div v-if="mode === 'normal'" class="chat-suggestion"><span class="eyebrow">可以这样开始</span><div><button type="button" @click="draft = '我最近有点不知道下一步该做什么。'">我不知道下一步做什么</button><button type="button" @click="draft = '帮我回顾一下最近的成长。'">帮我回顾最近的成长</button><button type="button" class="low-mood-trigger" @click="mode = 'low-mood'">我有点累，想放弃</button></div></div>
       <div v-else class="chat-suggestion"><span class="eyebrow">慢慢想，不急着回答</span><div><button type="button" @click="draft = '我想先把目标拆小一点。'">把目标拆小一点</button><button type="button" @click="draft = '我想重新看看为什么出发。'">重新看看为什么出发</button></div></div>
