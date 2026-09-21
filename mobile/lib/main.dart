@@ -1860,7 +1860,13 @@ class _AuthGateState extends State<AuthGate> {
         setState(() => _authenticated = state.session != null);
         if (state.session != null) widget.store.loadRemoteData();
       });
-      if (_authenticated) widget.store.loadRemoteData();
+      if (_authenticated) {
+        // initState 在 build 期间同步执行，直接调用 loadRemoteData 会让
+        // clearUserData 在 build 里 notifyListeners 触发断言，拖到帧尾再启动
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) widget.store.loadRemoteData();
+        });
+      }
     }
   }
 
