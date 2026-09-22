@@ -1,6 +1,6 @@
 # 探境 · App Store 上架清单
 
-盘点日期：2026-09-19（第三轮更新：图标已换、反馈表已建、AI 内容安全底线已上线；补全提审资料与注意事项）
+盘点日期：2026-09-21（第四轮更新：宣传文本 / 描述 / 关键词 / 审核备注定稿，见第九、十节）
 
 ## 一、当前状态
 
@@ -13,6 +13,7 @@
 | 导出合规声明 | ✅ `Info.plist` 已加 `ITSAppUsesNonExemptEncryption = false` |
 | 仅支持 iPhone | ✅ `TARGETED_DEVICE_FAMILY = "1"`，构建产物 `UIDeviceFamily = [1]` |
 | App 图标 / App 内 Logo | ✅ 已换成无水印版（15 个尺寸 + App 内 logo）；1024 那张由 512 放大，有原图可换更好的 |
+| 启动图 | ✅ 品牌圆角 logo（120pt，圆角比例与首页品牌标一致）+ `pageBg` 背景衔接首屏，构建校验无占位警告 |
 | 审核用测试账号 | ❌ 需你在 App Store Connect 建（App 强制登录，**最常见的拒审点**） |
 | 中国大陆备案 | 你来办（见第五节） |
 
@@ -78,9 +79,9 @@ App 强制登录，审核员进不去是最常见的拒审。建一个**邮箱�
 
 | 字段 | 建议 | 说明 |
 | --- | --- | --- |
-| 宣传文本 | 与 AI 一起把想做的事拆成下一步，并记录你的成长轨迹。 | 上限 170 字符，可随时改、不用重新审核 |
-| 描述 | 一句话定位 + 功能三段（对话与记忆 / 目标共创与成长路径 / 周报与画像）+ 一句「不提供医疗或心理治疗意见」 | 上限 4000 字符 |
-| 关键词 | `个人成长,目标管理,成长记录,AI陪伴,周报,记忆,复盘,自我管理,情绪记录,习惯养成` | 上限 100 字符、逗号分隔，别重复 App 名称 |
+| 宣传文本 | 定稿见 10.1（68 字符） | 上限 170 字符，可随时改、不用重新审核 |
+| 描述 | 定稿见 10.2（735 字符） | 上限 4000 字符 |
+| 关键词 | 定稿见 10.3（49 字符） | 上限 100 字符、逗号分隔，别重复 App 名称 |
 | 支持 URL | `https://zhoubo416.github.io/explorer/legal/index.html` | **必填** |
 | 营销 URL | 可留空 | |
 | 版权 | `© 2026 <你的名字或主体>` | |
@@ -111,7 +112,7 @@ App 强制登录，审核员进不去是最常见的拒审。建一个**邮箱�
 | 联系信息 | 名 / 姓 / 电话 / 邮箱（用能及时查收的邮箱，审核会通过它联系你） |
 | 「App 需要登录」 | 是 |
 | 演示账号 | 一个**邮箱已确认、有真实数据**的账号（建议提前跑几次对话、建一个目标、生成过画像与周报） |
-| 备注 | 用第九节那段口径，写清体验路径、删除账号位置、AI 内容安全做法 |
+| 备注 | 第九节已定稿，替换演示账号后整段复制（建议中英文各贴一段） |
 | 附件 | 可选：录 30 秒操作视频，被拒时可直接用于申诉 |
 
 ### 4.5 价格与销售范围
@@ -158,16 +159,78 @@ App 强制登录，审核员进不去是最常见的拒审。建一个**邮箱�
 1. ~~**退出登录不清内存中的业务数据**~~（已修，2026-09-19）：`ExploreStore.clearUserData()` 会在退出登录、删除账号、以及每次 `loadRemoteData()` 开头清空内存中的目标 / 记忆 / 对话 / 画像等；`currentGoal` 改为可空，目标详情页等按空态渲染。顺带修好了「换账号后新用户的本地缓存不生效」（此前内存非空会让 `_applyCachedData` 直接跳过）。
 2. ~~**AI 内容安全只有举报入口**~~（已修，2026-09-19）：`explore-conversation` 三种模式与 `explore-goal-chat` 的提示词都写入了安全底线（不做诊断与医疗建议、不鼓励极端行为、识别到自伤或伤人倾向时引导联系专业帮助、紧急情况建议拨打当地急救电话），并已部署；陪伴模式在应用内显示紧急求助提示。测试见 `supabase/functions/explore-conversation/prompt.test.ts` 与 `mobile/test/layout_test.dart` 的「低情绪模式显示紧急求助提示」。
 
-## 九、审核备注可用口径
+## 九、审核备注（定稿）
 
-提审时在 App Review Information 的 Notes 里可以这样写（按实际改动更新）：
+提审时在 App Review Information 的 Notes 里整段复制，先把 `<邮箱>` / `<密码>` 换成 4.4 的演示账号。审核团队大多在美国，销售范围含英语区时建议中英文各贴一段。
 
-> 探境是一款个人成长陪伴应用，不是医疗或心理服务。核心功能：与 AI 对话梳理目标、记录成长记忆、生成周报与成长画像。
+### 中文版
+
+> 探境是一款个人成长记录与陪伴应用，不是医疗或心理服务。核心功能：与 AI 对话梳理目标、自动保存成长记忆、生成每周成长周报与个人画像。
 >
-> 测试账号：<邮箱 / 密码>（已通过邮箱确认，账号内已有目标、记忆与对话数据）。登录后依次可见：首页今日建议 → 对话 → 成长（记忆 / 目标）→ 我的。
+> 审核账号：<邮箱> / <密码>（邮箱已确认，可直接登录；账号内已预置目标、记忆、对话、画像与周报，登录后各页面均有内容）。底部导航依次为：首页（今日观察与建议）→ 成长（目标 / 记忆）→ 对话 → 我的（画像、周报、账号操作）。体验路径：在对话页发送任意一句话，即可看到 AI 流式回复与自动保存的记忆（回复为流式生成，等待数秒属正常现象）；「成长 → 创建目标」可与 AI 共创目标，并自动拆出阶段与行动项；「我的 → 成长周报」可查看每周复盘。
 >
-> 内容安全：AI 回复的生成规则中已包含安全底线——不做诊断、不给出医疗或心理治疗建议、不鼓励自伤或伤害他人；当用户表达自伤倾向时，会明确表达关心并建议联系专业帮助。陪伴模式在界面上固定显示紧急求助提示。应用内「我的 → 意见反馈 / 内容举报」可举报不当回复。
+> 新注册账号需完成邮箱确认后才能登录；演示账号已确认，无需再收验证邮件。
 >
-> 账号删除：我的 → 删除账号，二次确认后账号与全部数据（目标、记忆、对话、反馈）立即删除，不可恢复。
+> 内容安全：AI 回复的生成规则中已包含安全底线——不做诊断、不提供医疗或心理治疗建议、不鼓励自伤或伤害他人；当用户表达自伤倾向时，AI 会明确表达关心并建议联系专业帮助；「成长陪伴」模式在界面固定显示紧急求助提示。应用内「我的 → 意见反馈 / 内容举报」可随时举报不当回复。
 >
-> 隐私：隐私政策 https://zhoubo416.github.io/explorer/legal/privacy.html ，用户协议 https://zhoubo416.github.io/explorer/legal/terms.html ，支持页 https://zhoubo416.github.io/explorer/legal/index.html 。数据存储于 Supabase（美国东部），对话内容经 DeepSeek 生成回复、记忆文本经阿里云百炼向量化，均已在隐私政策中披露。
+> 账号删除：我的 → 删除账号，二次确认后账号与全部数据（目标、记忆、对话、反馈）立即删除、不可恢复，该账号无法再登录。
+>
+> 隐私：隐私政策 https://zhoubo416.github.io/explorer/legal/privacy.html ，用户协议 https://zhoubo416.github.io/explorer/legal/terms.html ，支持页 https://zhoubo416.github.io/explorer/legal/index.html 。数据存储于 Supabase（美国东部）；对话内容经 DeepSeek 生成回复、记忆文本经阿里云百炼向量化，均已在隐私政策中披露。应用不收集广告标识符，不进行跨应用追踪。
+
+### 英文版（销售范围含英语区时一并贴上）
+
+> Explore (探境) is a personal growth journaling and companion app. It is NOT a medical or psychological service. Core features: chat with AI to clarify goals, automatically save growth memories from conversations, and generate weekly growth reports and a personal profile.
+>
+> Demo account: <email> / <password> (email already confirmed — sign in directly; the account is pre-populated with goals, memories, conversations, a profile and a weekly report, so every page has content). Bottom navigation: Home (daily observation & suggestions) → Growth (Goals / Memories) → Chat → Me (profile, weekly reports, account actions). Suggested path: send any message in Chat to see a streamed AI reply and automatic memory saving (replies are streamed and take a few seconds — this is normal); in Growth → Create Goal, co-create a goal with AI that is automatically broken down into stages and action items; Me → Weekly Reports shows the weekly review.
+>
+> New registrations require email confirmation before signing in; the demo account is already confirmed — no verification email needed.
+>
+> Content safety: AI generation rules include a hard safety baseline — no diagnosis, no medical or psychological treatment advice, no encouragement of self-harm or harming others. When a user expresses self-harm intent, the AI expresses care and directs them to professional help. The low-mood companion mode permanently displays an emergency-help notice. Users can report inappropriate AI replies via Me → Feedback / Content Report.
+>
+> Account deletion: Me → Delete Account. After a confirmation dialog, the account and ALL data (goals, memories, conversations, feedback) are deleted immediately and cannot be recovered; the account can no longer sign in.
+>
+> Privacy: Privacy Policy https://zhoubo416.github.io/explorer/legal/privacy.html | Terms https://zhoubo416.github.io/explorer/legal/terms.html | Support https://zhoubo416.github.io/explorer/legal/index.html . Data is stored on Supabase (US East); conversation content is processed by DeepSeek to generate replies, and memory text is embedded by Alibaba Cloud Bailian — both are disclosed in the privacy policy. The app collects no advertising identifiers and performs no cross-app tracking.
+
+## 十、商店文案定稿（直接复制进 App Store Connect）
+
+### 10.1 宣传文本（Promotional Text，上限 170 字符，本文 68 字符；可随时修改，不需重新审核）
+
+一个有长期记忆的 AI 成长伙伴：想做的事聊着聊着就拆成下一步行动，重要的决定与感受自动存为成长记忆；每周一份成长周报，画像越用越懂你。
+
+### 10.2 描述（Description，上限 4000 字符，本文 735 字符）
+
+探境是一个基于长期记忆的 AI 个人成长伙伴。你只管和它聊，它负责记住、整理、提醒和陪伴——把散落在日常里的决定、进展与感受，变成清晰可见的成长轨迹。
+
+【聊着聊着，事情就清楚了】
+· 三种对话模式：日常交流、成长陪伴、目标共创，按当下需要切换
+· 重要的决定、进展、情绪与思考会被自动识别并存为成长记忆，闲聊不会污染记录
+· 它带着记忆回应你：结合你的目标阶段、过往记忆与个人画像，而不是每次从零开始
+
+【目标不只是许愿，而是拆成下一步】
+· 和 AI 聊出想做的事，自动拆解为多个阶段与可勾选的行动项
+· 勾选行动项，或在对话里汇报进展，目标阶段会自动推进
+· 完整的目标状态管理：探索、进行、暂停、受阻、完成、归档
+· 想放弃的时候，它会陪你分三层聊清楚：发生了什么、已有的成果、放弃的是方向还是方法，然后给出判断，而不是替你做决定
+
+【成长看得见】
+· 首页每天有 AI 今日观察与下一步建议，跟随你的当前主目标
+· 每周一份成长周报：本周得分、洞察与建议，历史每一周都可回看
+· 个人画像：从你的真实记忆中提炼性格、价值观、兴趣、优势与待提升项，越用越懂你
+· 记忆时间线与阶段总结，回望走过的每一段路
+
+【一个会主动关心你的伙伴】
+目标停滞时提醒你，情绪低落时陪伴你，取得突破时祝贺你，也会在你安静许久之后邀请一次深度反思。
+
+【你的数据属于你】
+· 数据仅自己可见，不同账号完全隔离
+· 「我的 → 删除账号」可随时彻底删除账号与全部数据
+· 「我的 → 意见反馈 / 内容举报」可随时反馈问题或举报不当内容
+
+【重要说明】
+探境是个人成长记录与陪伴工具，不提供医疗诊断或心理治疗服务。如果你正处于情绪困扰中，请及时寻求专业帮助，应用内也提供了求助指引。
+
+### 10.3 关键词（Keywords，上限 100 字符，本文 49 字符）
+
+个人成长,目标管理,AI陪伴,成长记录,周报,记忆,复盘,自我管理,情绪记录,习惯养成,自律,规划
+
+说明：App 搜索只索引「名称 + 副标题 + 关键词」三处，描述不参与索引。副标题「用对话记录成长的个人 Agent」已覆盖「对话 / 记录 / 成长 / 个人」，这些单字不再占用关键词名额；「个人成长」「成长记录」虽与副标题部分重合，但作为整词是品类核心搜索词，宁可浪费几个字符也不能缺席。
